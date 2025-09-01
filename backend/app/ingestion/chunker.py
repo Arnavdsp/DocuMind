@@ -7,3 +7,7 @@ def sliding_window_chunks(text, chunk_size=512, overlap=64):
         chunks.append(' '.join(words[i:i+chunk_size]))
         i += (chunk_size - overlap)
     return chunks
+
+def filter_empty(chunks):
+    """Remove blank or whitespace-only chunks before embedding."""
+    return [c for c in chunks if c.strip()]
