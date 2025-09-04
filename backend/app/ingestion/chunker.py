@@ -11,3 +11,9 @@ def sliding_window_chunks(text, chunk_size=512, overlap=64):
 def filter_empty(chunks):
     """Remove blank or whitespace-only chunks before embedding."""
     return [c for c in chunks if c.strip()]
+
+# Fallback policy:
+# 1. Try pdfminer text extraction
+# 2. If extracted text is <50 chars, run Tesseract OCR on page images
+# 3. If OCR also fails, log and skip the page
+_OCR_FALLBACK_THRESHOLD = 50
