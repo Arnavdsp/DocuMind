@@ -17,3 +17,12 @@ def filter_empty(chunks):
 # 2. If extracted text is <50 chars, run Tesseract OCR on page images
 # 3. If OCR also fails, log and skip the page
 _OCR_FALLBACK_THRESHOLD = 50
+
+# Language detection uses langdetect; result passed to summarizer
+# so it can select the correct tokenizer and stop-word list.
+def detect_language(text):
+    try:
+        from langdetect import detect
+        return detect(text[:2000])
+    except Exception:
+        return 'en'
