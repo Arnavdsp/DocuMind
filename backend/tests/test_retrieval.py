@@ -98,3 +98,13 @@ def test_retrieve_on_missing_document_abstains(tmp_path: Path):
     )
     assert result.grounding == GroundingLevel.NONE
     assert result.candidates == []
+
+
+def test_rrf_rewards_overlap():
+    from backend.app.rag.fusion import reciprocal_rank_fusion
+    dense = ['doc_a', 'doc_b', 'doc_c']
+    sparse = ['doc_b', 'doc_d', 'doc_a']
+    scores = reciprocal_rank_fusion(dense, sparse)
+    # doc_b and doc_a appear in both lists — should outscore doc_c and doc_d
+    assert scores['doc_b'] > scores['doc_c']
+    assert scores['doc_a'] > scores['doc_d']
