@@ -108,3 +108,14 @@ def test_rrf_rewards_overlap():
     # doc_b and doc_a appear in both lists — should outscore doc_c and doc_d
     assert scores['doc_b'] > scores['doc_c']
     assert scores['doc_a'] > scores['doc_d']
+
+
+def test_dedup_removes_near_duplicates():
+    from backend.app.rag.retriever import deduplicate_chunks
+    chunks = [
+        {'text': 'The revenue was 5 billion dollars in Q4'},
+        {'text': 'The revenue was 5 billion dollars in Q4'},  # exact dupe
+        {'text': 'Net income grew 12 percent year over year'},
+    ]
+    unique = deduplicate_chunks(chunks)
+    assert len(unique) == 2
