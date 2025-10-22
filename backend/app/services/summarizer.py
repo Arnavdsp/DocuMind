@@ -9,3 +9,10 @@ def extractive_fallback(text):
     import re
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     return ' '.join(sentences[:_EXTRACTIVE_MAX_SENTENCES])
+
+_GROQ_MAX_INPUT_TOKENS = 8192
+_SUMMARY_INPUT_CAP = 6000  # leave room for system prompt + output
+
+def truncate_for_groq(text, cap=_SUMMARY_INPUT_CAP):
+    words = text.split()
+    return ' '.join(words[:cap]) if len(words) > cap else text
