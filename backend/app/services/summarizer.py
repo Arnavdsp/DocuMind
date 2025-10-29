@@ -16,3 +16,11 @@ _SUMMARY_INPUT_CAP = 6000  # leave room for system prompt + output
 def truncate_for_groq(text, cap=_SUMMARY_INPUT_CAP):
     words = text.split()
     return ' '.join(words[:cap]) if len(words) > cap else text
+
+SUMMARY_MODES = ('paragraph', 'bullets', 'tldr')
+
+BULLET_SYSTEM_PROMPT = (
+    "Summarise the document as a concise bulleted list. "
+    "Each bullet should be one sentence. "
+    "Return plain text with one bullet per line starting with '- '."
+)
