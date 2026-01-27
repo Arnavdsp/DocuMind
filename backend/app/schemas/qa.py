@@ -54,3 +54,17 @@ class AskResponse(BaseModel):
         description="Measured per-stage wall-clock time. A stage that did not run "
         "reports null, never 0, so latency percentiles built from these are honest.",
     )
+
+from pydantic import BaseModel
+from typing import List
+
+class SourceChunk(BaseModel):
+    chunk_id: str
+    text: str
+    score: float
+
+class QAResponse(BaseModel):
+    question: str
+    answer: str
+    sources: List[SourceChunk]
+    model: str
