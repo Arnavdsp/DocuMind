@@ -46,3 +46,9 @@ def test_ask_rejects_empty_question(client):
 
     ask_resp = client.post(f"/api/documents/{document_id}/ask", json={"question": ""})
     assert ask_resp.status_code == 422  # pydantic min_length validation
+
+
+def test_health_endpoint(client):
+    r = client.get('/health')
+    assert r.status_code == 200
+    assert r.json()['status'] == 'ok'
