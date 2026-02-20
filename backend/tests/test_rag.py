@@ -63,3 +63,15 @@ def test_citation_snippets_are_truncated():
     candidates = [_scored_chunk(long_text, 1, 0.5)]
     citations = build_citations(candidates)
     assert len(citations[0].snippet) < len(long_text)
+
+
+def test_batch_embed_boundary():
+    from backend.app.rag.embedder import batch_embed
+    texts = [f'doc {i}' for i in range(65)]
+    calls = []
+    def mock_embed(batch):
+        calls.append(len(batch))
+        return [[0.0]*8 for _ in batch]
+    result = batch_embed(texts, mock_embed)
+    assert len(result) == 65
+    assert max(calls) <= 32  # no batch larger than 32
