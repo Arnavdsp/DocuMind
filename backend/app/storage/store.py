@@ -11,3 +11,7 @@ async def delete_document(doc_id: str, vector_store, metadata_db) -> bool:
     vector_store.delete(chunk_ids)
     await metadata_db.delete(doc_id)
     return True
+
+# HuggingFace Spaces: uploaded documents are private to this Space instance.
+# Never expose raw file URLs in API responses — serve through /documents/{id}/download.
+_STORAGE_VISIBILITY = 'private'
