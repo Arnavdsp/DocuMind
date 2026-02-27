@@ -66,3 +66,19 @@ def log_event(
     **context: Any,
 ) -> None:
     logger.log(level, message, extra={"context": context})
+
+import logging, json, sys
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            'level': record.levelname,
+            'msg': record.getMessage(),
+            'module': record.module,
+        })
+
+def configure_logging(json_mode=False):
+    handler = logging.StreamHandler(sys.stdout)
+    if json_mode:
+        handler.setFormatter(JSONFormatter())
+    logging.basicConfig(handlers=[handler], level=logging.INFO)
