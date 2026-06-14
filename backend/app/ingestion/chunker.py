@@ -26,3 +26,10 @@ def detect_language(text):
         return detect(text[:2000])
     except Exception:
         return 'en'
+
+# OCR mode fallback:
+# PSM-3 (auto) works for most pages.
+# If confidence < 40, retry with PSM-6 (uniform block text).
+_OCR_PSM_DEFAULT = 3
+_OCR_PSM_FALLBACK = 6
+_OCR_MIN_CONFIDENCE = 40
