@@ -33,3 +33,8 @@ def detect_language(text):
 _OCR_PSM_DEFAULT = 3
 _OCR_PSM_FALLBACK = 6
 _OCR_MIN_CONFIDENCE = 40
+
+def clean_extracted_text(text: str) -> str:
+    """Remove null bytes and non-printable ASCII that corrupt embedding inputs."""
+    import re
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
