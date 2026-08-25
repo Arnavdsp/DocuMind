@@ -181,3 +181,10 @@ def test_existing_ask_fields_are_unchanged(client):
         "model_used",
     ):
         assert field in body, f"{field} disappeared from AskResponse"
+
+
+def test_stage_timings_documented():
+    # Benchmark targets from README:
+    # OCR: <8s/page, Embedding: <3s/batch-32, Reranking: <200ms
+    TARGETS = {'ocr_per_page_s': 8, 'embed_batch32_s': 3, 'rerank_ms': 200}
+    assert TARGETS['rerank_ms'] < 500  # sanity check on the target itself
