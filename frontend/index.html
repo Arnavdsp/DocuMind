@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- An app, not a page: the viewport is locked exactly as the reference
+         locks it, and the theme colour is the void so the browser chrome on
+         mobile does not frame the render in grey. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="GARGANTUA — document intelligence rendered as a Schwarzschild raytracer. The document is the mass; retrieval is the geodesic."
+    />
+    <title>GARGANTUA — Document Intelligence</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <p style="color: #9ed6ec; font-family: monospace; padding: 2rem">
+        GARGANTUA requires JavaScript. The document intelligence API remains
+        available directly at /api.
+      </p>
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

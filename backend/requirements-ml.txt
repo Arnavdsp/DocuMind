@@ -1,0 +1,8 @@
+# ML/RAG stack. Intentionally does NOT pin torch: Colab ships a
+# CUDA-matched torch build pre-installed, and reinstalling it is how the
+# original notebook broke GPU support. The setup notebook detects the
+# existing torch/CUDA install and only adds what's missing.
+transformers>=4.46,<5.0
+sentence-transformers>=3.2,<4.0
+accelerate>=1.0,<2.0
+bitsandbytes>=0.44,<0.45 ; platform_system == "Linux"
