@@ -40,15 +40,20 @@ os.environ.setdefault("MODEL_DEVICE", "cpu")
 # against the live Space, not assumed.
 os.environ.setdefault("TRANSLATION_PROVIDER", "groq")
 
-# A bucket is mounted at /data on this Space, so indexes survive a restart
-# instead of being wiped with the container. Only used when the mount is
-# actually present and writable — pipeline falls back to a temporary directory
-# and says so on screen rather than failing to start.
+# A bucket is mounted at /data on this Space. Only the MODEL CACHE goes there.
+#
+# DATA_DIR deliberately does NOT: NumpyVectorStore writes chunk *text* into its
+# .npz files, and this bucket is public, so pointing DATA_DIR at the mount
+# published every visitor's uploaded document at a public URL — while the
+# README continued to promise "uploads are session-scoped and are not
+# persisted". Document state therefore stays on ephemeral container disk,
+# which is what that promise describes.
+#
+# Model weights are a different case: they are public upstream models, nothing
+# private is disclosed by caching them, and it saves ~90 MB of download on
+# every cold start.
 _DATA_MOUNT = "/data"
 if os.path.isdir(_DATA_MOUNT) and os.access(_DATA_MOUNT, os.W_OK):
-    os.environ.setdefault("DATA_DIR", _DATA_MOUNT)
-    # Model weights land here too. They are ~180 MB that would otherwise be
-    # re-downloaded into ephemeral container disk on every cold start.
     os.environ.setdefault("HF_HOME", f"{_DATA_MOUNT}/.cache/huggingface")
 
 # SSR is deliberately left at the platform default. Disabling it was tried and
@@ -280,8 +285,8 @@ def _status_bar_inner() -> str:
         f'<div class="dm-card"><div class="dm-note">BACKEND</div>'
         f'<div class="dm-kv"><div><span class="k">model</span>'
         f'<span class="v">{pipeline.backend_name()}</span></div>{rows}'
-        f'<div><span class="k">storage</span>'
-        f'<span class="v">{pipeline.storage_location()}</span></div>'
+        f'<div><span class="k">document storage</span>'
+        f'<span class="v">{pipeline.storage_location()} (ephemeral)</span></div>'
         f"</div></div>{warn}"
     )
 

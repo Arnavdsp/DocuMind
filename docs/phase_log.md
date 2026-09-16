@@ -1123,3 +1123,59 @@ Node SSR proxy is load-bearing on this tier. SSR is now left at the platform
 default, and the reasoning is recorded in the file so it is not retried
 blindly. Document identity does not depend on it either way, since it lives in
 a visible textbox rather than a per-session `gr.State`.
+
+---
+
+## Phase 0.11 — Mounted bucket: a correction and a privacy defect
+
+### Correction: buckets are not simply "paid"
+
+Told Arnav that HF Buckets are a paid feature, sourced from the
+`huggingface-spaces` skill's `references/buckets.md`, which opens "Buckets are
+paid (per-TB storage)" and then links "Pricing **+ free tier**". The first half
+was repeated as settled fact and the qualifier was dropped, which drove a real
+decision — Arnav was about to remove the bucket over it.
+
+The primary documentation says otherwise:
+
+> "As for other repositories, buckets are **free to create and have a free
+> storage allowance**." — https://huggingface.co/docs/hub/storage-buckets
+
+A free user account gets **100 GB private storage**; billing is per-TB only
+above the free tier. DocuMind stores a ~90 MB model cache, roughly 0.1% of the
+allowance. The bucket costs nothing at this scale and was kept.
+
+**Lesson recorded:** a secondhand source that links to a pricing page has not
+established a price. Check the primary source before a cost claim changes what
+someone does.
+
+### BUG-6 — Uploaded documents were published to a public bucket
+
+Wiring `DATA_DIR=/data` to gain persistence had a consequence not thought
+through. `NumpyVectorStore` writes **chunk text** into its `.npz` files, the
+mounted bucket is **public** (`private: False`), and public bucket objects are
+served at `https://huggingface.co/buckets/<ns>/<bucket>/resolve/<path>`.
+
+So every visitor's uploaded document became publicly downloadable — while the
+Space README continued to promise "Uploads are session-scoped and are not
+persisted". Confirmed by listing the bucket and finding
+`index/<document_id>.npz` present.
+
+**Fixed.** Only `HF_HOME` points at the mount now. Model weights are public
+upstream models, so caching them discloses nothing and still saves ~90 MB of
+download per cold start. `DATA_DIR` stays on ephemeral container disk, which is
+what the README's promise actually describes. The status row now reads
+`document storage … (ephemeral)` rather than implying durability.
+
+The published `.npz` files were deleted from the bucket, and the fix was
+verified by clearing `index/`, ingesting a fresh document through the live
+Space, and re-listing: the answer came back correctly and **nothing** reached
+the bucket.
+
+### Startup hardening kept
+
+The bucket also introduced a new way for the Space to die before first paint,
+since `pipeline.py` does filesystem work at import. That hardening (fallback
+to a temporary directory with an on-screen banner, and a `_status_bar()` that
+cannot raise) is retained regardless of whether a bucket is mounted — it
+applies to any unwritable `DATA_DIR`.
