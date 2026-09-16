@@ -30,3 +30,6 @@ backend/.env
 .idea/
 .vscode/
 *.swp
+
+# Generated Space bundle (tools/build_space.py)
+build/

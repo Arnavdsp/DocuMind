@@ -590,3 +590,103 @@ Not fixed here. Reporting it truthfully requires `translate()` to return
 segment counts rather than a bare string, which is the FR-22 work in Phase
 0.6 along with `segments_total` / `segments_translated` / `content_dropped`.
 Recorded so it is not lost.
+
+---
+
+## Phase 0.5 — DocuMind Space (out of plan order, by request)
+
+**Status:** built and verified locally; deploy pending authentication
+**Tests:** 85 → **93** (8 added, zero existing tests modified)
+
+### Ordering deviation
+
+The roadmap puts deployment in Phase 5, after the eval harness and the frozen
+baseline. This was built at Arnav's request while Phase 0 is still in
+progress. The consequence is recorded rather than hidden: **the Evidence tab
+has no numbers**, because no evaluation has been run yet. It renders an
+all-em-dash table and says explicitly that the harness has not run. That is
+the project's own rule applied to itself — an unmeasured value is an em-dash,
+not a plausible placeholder.
+
+### Free-tier rules, re-verified (RISK-5, `05` §7)
+
+Checked against the official `huggingface-spaces` skill on 2026-09-16:
+
+| Claim in `05` §1 | Verdict |
+|---|---|
+| Free accounts cannot create a Docker or plain CPU Gradio Space | **confirmed** — Gradio and Docker Spaces need a paid plan; `cpu-basic` is gated too |
+| Free accounts get Static Spaces and ZeroGPU Gradio Spaces | **confirmed** |
+| ZeroGPU cap of 2 Spaces per free account | **confirmed** |
+| "~5 minutes of shared GPU time per day" for the account | **corrected** — the Space creator is not charged; each *visitor* consumes their own daily quota (~5 min free tier). The plan's arithmetic of "40–60 visitor interactions per day" understated capacity. |
+
+**One fact changes the design.** The skill documents that a CPU-bound or
+API-proxy Space on a free account should use `zero-a10g` with a single no-op
+`@spaces.GPU` function — ZeroGPU requires at least one — while keeping the
+real work outside it, so no quota is ever consumed.
+
+That fits exactly. Generation is a Groq HTTP call, and both local models
+(MiniLM embedder ~90 MB, cross-encoder ~90 MB) run acceptably on CPU. So
+DocuMind schedules on ZeroGPU without ever requesting a GPU. The quota-anxiety
+that shapes most of `05` §3.2 does not apply.
+
+### Metaphor decision
+
+The black-hole framing is not just naming: `schwarzschild.frag.glsl` is a real
+null-geodesic raytracer and `sim/mapping.ts` binds RAG state to physics.
+Renaming it "a mind" while the shader still renders a black hole would put a
+label on screen that contradicts the pixels — the same failure the project
+defines itself against.
+
+**Resolved:** DocuMind is its own surface with its own visual language — a
+document becomes memory nodes, a question becomes a signal, retrieved nodes
+fire, and abstention is "no pathway activated". The raytracer keeps the
+Gargantua identity and stays the Colab surface. The Space README states plainly
+that neither is a cut-down version of the other.
+
+### Structure
+
+| Path | Role |
+|---|---|
+| `space/app.py` | Gradio Blocks UI, DocuMind identity. Presentation only. |
+| `space/pipeline.py` | Thin adapter. Imports `app.rag.*` and `app.services.*`; defines no retrieval logic. |
+| `space/README.md` | Space card with frontmatter |
+| `space/requirements.txt` | Space runtime |
+| `tools/build_space.py` | Assembles a flat deploy bundle from the real tree |
+
+A Space repo must be flat — `app.py` at the root with its imports resolvable —
+but this repository keeps the application under `backend/app/`. The bundle is
+therefore **generated**, mirroring what `tools/build_notebook.py` already does
+for the Colab notebook, rather than maintaining a second hand-kept copy of
+`backend/app/`. `build/` is gitignored.
+
+`backend/tests/test_space_bundle.py` enforces the rule by AST inspection:
+neither `space/` file may define `retrieve`, `rerank`, `chunk_document`,
+`classify_grounding`, `generate_grounded_answer` or the fusion functions, and
+`pipeline.py` must import them from `app.*`.
+
+### Verified locally
+
+Bundle built (47 files), then run end to end against the real Groq API on a
+document containing known figures:
+
+| Question | Result |
+|---|---|
+| "What was the recall@4 for the hybrid configuration?" | answered `71.2 percent` with citation, grounding `strong`, top score 0.6807 |
+| "What was the p95 latency on the fast path?" | answered `980 milliseconds` with citation |
+| "What is the airspeed velocity of an unladen swallow?" | **abstained** |
+
+The run also exercised the disclosure path: `torch` was absent from the local
+environment, so the delegate fell back to mock embeddings and `backend_name`
+reported `groq:openai/gpt-oss-20b (embeddings: mock)`, which the UI renders as
+a banner. Real generation over meaningless retrieval scores was visible rather
+than silent — the property Phase 0.2 added, working.
+
+### Not done
+
+- Not deployed. `hf auth login` is a device flow requiring Arnav to authorise
+  in a browser; per R8 no credential is generated or requested inline.
+- No preloaded corpus yet (`05` §2.1 wants 2–3 eval documents indexed at build
+  time). That depends on the eval corpus, which is Phase 0.5 of the roadmap.
+- Summarize and translate are not exposed as tabs yet; `pipeline.summarize`
+  exists but has no UI. R4 requires all three pipelines at a phase boundary,
+  so this is incomplete against that gate and is recorded as such.
