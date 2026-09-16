@@ -19,9 +19,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import gradio as gr
+# This Space has decided to generate via Groq. Settings' own default is "auto",
+# which deliberately never selects the Groq backend — a key present in the
+# environment must not silently change which backend answers. Declaring it here,
+# in the deployment's own entry point, keeps that choice explicit and visible
+# rather than implicit. setdefault so an operator can still override it.
+os.environ.setdefault("MODEL_BACKEND", "groq")
 
-import pipeline
+import gradio as gr  # noqa: E402
+
+import pipeline  # noqa: E402
 
 # ZeroGPU requires at least one decorated entry point to schedule a Space.
 # Nothing here actually needs a GPU: generation is an API call and both local

@@ -1,16 +1,23 @@
-# Space runtime. Superset of backend/requirements.txt plus the UI layer.
+# Space runtime.
 #
-# torch and sentence-transformers are needed for the local embedder and
-# cross-encoder only. Generation is an HTTP call to Groq, so no GPU is used
-# and no visitor GPU quota is consumed.
+# NOT listed, deliberately:
+#   gradio  — locked by `sdk_version:` in README.md frontmatter; pinning here
+#             is ignored or breaks the build.
+#   spaces  — platform-pinned; a user pin always loses.
+#   torch   — ZeroGPU preinstalls a supported version. Left unpinned so the
+#             runtime picks it; only a narrow set of versions is accepted.
+#
+# torch is needed for the local embedder and cross-encoder only. Generation is
+# an HTTP call to Groq, so no GPU is used and no visitor quota is consumed.
 
-gradio==6.27.0
-spaces
-
-# --- backend core (mirrors backend/requirements.txt) ---
-pydantic==2.13.5
-pydantic-settings==2.15.0
-numpy==2.4.4
+# --- backend core ---
+# NOT pinned to backend/requirements.txt's exact versions. The Space image
+# installs gradio and spaces alongside these, and gradio's `mcp` extra caps
+# pydantic at <=2.12.5 — mirroring the backend's pydantic==2.13.5 makes the
+# build unresolvable. Ranges here, exact pins in the backend, both valid.
+pydantic>=2.7,<2.13
+pydantic-settings>=2.5,<3
+numpy>=2,<3
 
 # --- ingestion ---
 pdfplumber==0.11.9
@@ -25,6 +32,10 @@ deep-translator==1.11.4
 py3langid==0.3.0
 
 # --- local models (CPU) ---
-torch
-sentence-transformers>=3.2,<4.0
-transformers>=4.46,<5.0
+# Deliberately NEWER than backend/requirements-ml.txt, which targets Colab.
+# The Space image ships huggingface-hub >=1.0 for gradio 6; every
+# sentence-transformers <6 pulls transformers <5, which caps hub at <1.0 and
+# makes the build unresolvable. 6.x requires transformers >=5 and hub >=1.3,
+# which is what this image actually has. `transformers` is not listed
+# separately — sentence-transformers pulls a compatible one.
+sentence-transformers>=6,<7

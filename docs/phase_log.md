@@ -759,3 +759,82 @@ empty-state behaviour — with nothing indexed the disk does not glow
 (`MIGRATION.md`). Coercing there fabricates no telemetry; it selects a render
 state. Left as-is deliberately, recorded so the audit in Phase 6 does not
 re-flag them as defects.
+
+---
+
+## Phase 0.7 — DocuMind Space deployed
+
+**Status:** live at https://huggingface.co/spaces/ADP123456/DocuMind
+**Direct:** https://adp123456-documind.hf.space
+**Hardware:** `zero-a10g` (ZeroGPU), public, free account
+
+### Authentication
+
+`hf auth login` device flow, authorised in a browser by Arnav. No credential
+was generated, requested inline, or written to any file (R8/NFR-11). The Groq
+key is a Space **secret**, set via `hf spaces secrets add`; it is not visible
+to visitors and appears in no committed file.
+
+### Build failures and what they corrected
+
+The Space requirements could **not** simply mirror `backend/requirements.txt`.
+Two real conflicts, both fixed by reading the resolver output rather than
+guessing:
+
+1. **`pydantic==2.13.5` vs gradio.** The Space image installs
+   `gradio[oauth,mcp]`, and the `mcp` extra caps `pydantic<=2.12.5`. Mirroring
+   the backend's exact pin made the build unresolvable. Loosened to
+   `pydantic>=2.7,<2.13` in the Space only; the backend keeps its exact pins.
+
+2. **`transformers<5` vs `huggingface-hub`.** Every `sentence-transformers<6`
+   pulls `transformers<5`, which caps `huggingface-hub<1.0` — but the image
+   ships hub ≥1.0 for gradio 6. Resolved by moving the Space to
+   `sentence-transformers>=6,<7`, which requires `transformers>=5` and
+   `hub>=1.3`. `transformers` is no longer listed separately.
+
+This is a deliberate, recorded divergence: `backend/requirements-ml.txt`
+targets Colab and stays on the 3.x/4.x line; the Space targets the HF image.
+
+Also corrected against the platform rules: `gradio` and `spaces` are **not**
+listed (locked by `sdk_version:` frontmatter and platform-pinned
+respectively), and `torch` is left unpinned so the runtime supplies a
+supported build.
+
+### MODEL_BACKEND
+
+The CLI exposes no command for non-secret Space variables, so the Space sets
+`os.environ.setdefault("MODEL_BACKEND", "groq")` at the top of its own
+`app.py`. `Settings`' default stays `"auto"`, which still never selects Groq —
+the deployment makes the choice explicitly, in its own entry point, rather
+than a key in the environment silently changing which backend answers.
+
+### Verified
+
+- `GET /` → HTTP 200, `<title>DocuMind</title>`
+- `GET /gradio_api/info` → three named endpoints: `/do_ingest`, `/do_ask`,
+  `/do_retrieve`
+- Live logs show `config_sentence_transformers.json` downloading and **no**
+  `groq_local_delegate_is_mock` warning, so embeddings are real on the Space
+- The identical bundle driven in a real browser (Chromium, local instance over
+  plain HTTP): all three tabs render, ingestion reports `MEMORY NODES 1 ·
+  WORDS 82`, and the question *"What was the recall@4 for the hybrid
+  configuration?"* returned **"The recall@4 for the hybrid configuration was
+  71.2 percent【1】"** with grounding `strong`, top signal `0.6807`, and
+  per-stage telemetry `EMBED 0 ms · SEARCH 0 ms · RERANK 0 ms · GENERATE
+  945 ms · TOTAL 945 ms`
+
+The local browser run showed the STAND-IN EMBEDDINGS banner because that
+environment has no `torch`. That is the disclosure path working, and it is
+absent on the Space itself.
+
+### Known limitations
+
+- **The Space's HTTP API cannot hold a document.** `gr.State` is per-session,
+  so `gradio_client` callers get a fresh state each call and `/do_ask` replies
+  "Load a document first." The browser path is unaffected. Recorded rather
+  than worked around; a document-id-keyed handle would fix it if the API
+  surface is ever wanted.
+- No preloaded corpus yet, so a visitor must upload before anything happens.
+- Summarize and translate still have no tabs, so R4 (all three pipelines at a
+  phase boundary) is **not** met.
+- The Evidence tab remains all em-dashes until the harness runs.
