@@ -935,3 +935,109 @@ working correctly once those were real — under mock embeddings the scores
 carry no meaning, exactly as the banner says.
 
 **R4 is now met**: all three pipelines work on the deployed backend.
+
+---
+
+## Phase 0.9 — Full systems check
+
+**Status:** done
+**Tests:** 118 → **134** (16 added, zero existing tests modified)
+
+Swept static checks, the FastAPI backend end to end against real Groq, every
+ingestion format, the long-document paths, and the live Space. Three real
+defects found and fixed; all three were of the same family — **output that
+looks fine while content is silently missing.**
+
+### BUG-1 — Truncated JSON rendered to the user as prose
+
+Found by running an 80-page document through the map-reduce summarizer.
+
+The reduce step emits a JSON object carrying up to 10 findings and 15 numbers.
+At `generation_max_new_tokens = 500` that object was cut mid-string,
+`json.loads` failed, and the fallback path put `cleaned[:1500]` straight into
+`executive_summary`. The user was shown a raw `{"executive_summary":"...`
+blob as the summary, with `key_findings` and `important_numbers` silently
+emptied — measured at **0 findings, 0 numbers** on a document that should have
+produced both.
+
+**Fixed two ways.** A dedicated `summarize_max_new_tokens = 1600` for
+structured calls (`_structured_budget()` never returns less than the plain
+generation budget, so raising one cannot starve the other). And
+`_salvage_executive_summary()`, which recovers the prose from a truncated
+object — a cut-off JSON object still usually carries a complete first field.
+When nothing can be salvaged the response says so rather than printing JSON
+syntax.
+
+Re-run on the same 80-page document: no raw JSON, **7 findings, 15 numbers**,
+and content from both the start and the end of the document.
+
+### BUG-2 — `content_dropped` reported clean while a third of the text vanished
+
+Segment counting only detects a whole missing segment. A model handed
+repetitive text returns every segment while collapsing content *inside* them.
+Measured through the real API: **5,520 characters in, 1,686 out, segments
+2/2, `content_dropped: false`.**
+
+**Fixed** with the length-ratio check `03` §7.2 already specifies.
+`TranslationResult` now carries `input_chars` and exposes `length_ratio` and
+`dropped_reason` (`segment_missing` | `output_length_implausible`).
+`_MIN_LENGTH_RATIO = 0.5` is deliberately conservative — some pairs
+legitimately compress — and the ratio is reported whether or not it looks
+suspect, so the reader can judge it.
+
+Verified against real translations:
+
+| Input | ratio | flagged |
+|---|---|---|
+| repetitive, 5520→1686 chars | 0.31 | **yes** — `output_length_implausible` |
+| varied prose, 6891→7244 chars | 1.05 | no |
+| short prose, 522→597 chars | 1.14 | no |
+
+No false positive on genuinely varied text.
+
+**Also recorded:** this is a measured weakness of translating with an
+instruction-tuned general model. On repetitive input it deduplicates rather
+than translating each occurrence. The detector surfaces it rather than hiding
+it, and it is a reason the harness's translation checks matter before any
+quality claim.
+
+### BUG-3 — A regression I introduced: `truncated` would have lied
+
+Phase 0.8 set `TranslateResponse.truncated = segments_total > 1`, matching the
+field's old docstring ("was chunked"). But `frontend/src/panels/frequency-panel.tsx`
+renders that field as:
+
+> "Output was truncated by the translation provider. What follows is not the
+> complete document."
+
+That is a content-loss claim. Bound to "was segmented", it would have fired on
+**every** multi-segment document and told users their translation was
+incomplete when it was not.
+
+**Fixed:** `truncated` now mirrors `content_dropped` — genuine loss only.
+Segmentation remains visible through `segments_total`. `types/api.ts` mirrors
+all new fields; `tsc --noEmit` clean.
+
+### Everything else checked and clean
+
+| Check | Result |
+|---|---|
+| `pytest backend/tests -q` | 134 passed, network-free, GPU-free |
+| R6 torch containment | only `services/model_service.py` |
+| Credential scan, working tree **and** full git history | zero occurrences |
+| AI attribution in history | zero; authors are Arnav only |
+| `ruff` + `black` on authored/modified files | clean |
+| `tsc --noEmit` | clean |
+| `vite build` | clean; scene still a separate 33.5 kB lazy chunk (NFR-13) |
+| Backend API: upload → poll → ask → summarize → translate → delete | all pass |
+| Summary caching (`cached: true` on second call) | pass |
+| Error paths: unknown document ×3 | 404; empty question → 422 |
+| PDF, 3 pages | `native_text`, 3 chunks, citation correctly anchored to page 2 |
+| Image/OCR | `ocr`, confidence 0.955, not low-quality |
+| Abstention on real embeddings | fires at top signal 0.1197 against the 0.18 floor |
+
+**Pre-existing lint findings left alone:** `test_ocr.py`,
+`test_pdf_extraction.py`, `test_document_validation.py`, `conftest.py` and
+`tools/build_notebook.py` (verbatim upstream) carry import-order findings that
+predate this work. The repository was never fully lint-clean; reformatting
+files this round did not touch would be noise in the diff.

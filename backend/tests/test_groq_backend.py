@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from app.config import Settings
 from app.services.model_service import GroqModelService, MockModelService
 from app.utils.errors import ModelUnavailable
@@ -138,9 +137,7 @@ def test_missing_key_raises_instead_of_falling_back(monkeypatch):
 
 
 def test_rate_limit_is_retried_then_succeeds(monkeypatch, no_sleep):
-    calls = _patch_post(
-        monkeypatch, [_StubResponse(429, {}, {"retry-after": "0"}), _ok("recovered")]
-    )
+    calls = _patch_post(monkeypatch, [_StubResponse(429, {}, {"retry-after": "0"}), _ok("recovered")])
     service = GroqModelService(_settings(), MockModelService())
     assert service.generate("sys", "user", max_new_tokens=100, temperature=0.0) == "recovered"
     assert len(calls) == 2

@@ -118,7 +118,20 @@ export interface TranslateResponse {
   target_language: string;
   translated_text: string;
   provider: string;
+  /** True only when content was genuinely lost. Segmentation alone is not
+   *  truncation — the UI states "not the complete document" on this, so it
+   *  must never fire merely because the input was split. */
   truncated: boolean;
+  /** True when the caller declared the source language; false when it was
+   *  detected or could not be determined. */
+  source_language_detected?: boolean;
+  segments_total?: number | null;
+  segments_translated?: number | null;
+  content_dropped?: boolean;
+  /** "segment_missing" | "output_length_implausible" | null */
+  dropped_reason?: string | null;
+  /** Output characters per input character. Null when there was no input. */
+  length_ratio?: number | null;
 }
 
 export interface DocumentPage {

@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     # rejected outright. A Space doing its embedding on CPU must say so.
     model_device: Literal["auto", "cpu", "cuda"] = "auto"
     generation_max_new_tokens: int = 500
+    # Structured summarization emits a JSON object carrying up to 10 findings
+    # and 15 numbers. At 500 tokens that object is cut mid-string, json.loads
+    # fails, and the summary silently degrades to raw JSON text. Budgeted
+    # separately rather than raising the answer budget, which does not need it.
+    summarize_max_new_tokens: int = 1600
     generation_temperature: float = 0.0
 
     # --- Groq generation backend ---

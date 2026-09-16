@@ -493,9 +493,7 @@ class GroqModelService(ModelService):
             try:
                 return body["choices"][0]["message"]["content"].strip()
             except (KeyError, IndexError, AttributeError) as exc:
-                raise ModelUnavailable(
-                    internal_detail=f"unexpected groq response shape: {exc}"
-                ) from exc
+                raise ModelUnavailable(internal_detail=f"unexpected groq response shape: {exc}") from exc
 
         raise ModelUnavailable(
             internal_detail=f"groq unavailable after {self._settings.groq_max_retries} attempts: {last_detail}"

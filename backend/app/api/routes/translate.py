@@ -6,8 +6,8 @@ from app.config import Settings, get_settings
 from app.dependencies import get_blob_store, get_repository
 from app.schemas.documents import ProcessingStage
 from app.schemas.translate import TranslateRequest, TranslateResponse
-from app.services.translation_service import get_translation_provider, translate_document
 from app.services.model_service import ModelService, get_model_service
+from app.services.translation_service import get_translation_provider, translate_document
 from app.storage.blob_store import DocumentBlobStore
 from app.storage.repository import Repository
 from app.utils.errors import DocumentNotFound, DocumentNotReady
@@ -43,9 +43,7 @@ async def translate(
     detected = provider.detect_language(full_text) if not declared else None
     source_language = declared or detected or "auto"
 
-    result = translate_document(
-        provider, full_text, source=source_language, target=request.target_language
-    )
+    result = translate_document(provider, full_text, source=source_language, target=request.target_language)
 
     return TranslateResponse(
         document_id=document_id,
@@ -54,10 +52,15 @@ async def translate(
         target_language=request.target_language,
         translated_text=result.text,
         provider=provider.name,
-        # Previously passed False unconditionally. Now an observation: true
-        # when the input needed more than one sentence-boundary segment.
-        truncated=result.segments_total > 1,
+        # Previously passed False unconditionally. It now reports genuine
+        # content loss, NOT mere segmentation: the frontend renders this as
+        # "What follows is not the complete document", which would be a false
+        # claim on every multi-segment document. Segmentation is visible
+        # separately via segments_total.
+        truncated=result.content_dropped,
         segments_total=result.segments_total,
         segments_translated=result.segments_translated,
         content_dropped=result.content_dropped,
+        dropped_reason=result.dropped_reason,
+        length_ratio=result.length_ratio,
     )

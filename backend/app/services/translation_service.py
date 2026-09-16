@@ -179,13 +179,18 @@ class GroqTranslationProvider(TranslationProvider):
 def get_translation_provider(provider_name: str, model_service=None) -> TranslationProvider:
     if provider_name == "groq":
         if model_service is None:
-            raise TranslationFailed(
-                internal_detail="the groq translation provider needs a model service"
-            )
+            raise TranslationFailed(internal_detail="the groq translation provider needs a model service")
         return GroqTranslationProvider(model_service)
     if provider_name == "google":
         return GoogleTranslateProvider()
     return NullTranslationProvider()
+
+
+# Below this output/input character ratio, the translation is treated as
+# having lost content. Deliberately conservative: some pairs legitimately
+# compress (English into Chinese, for instance), so this is set well under any
+# honest compression rather than at a "typical" ratio.
+_MIN_LENGTH_RATIO = 0.5
 
 
 @dataclass(frozen=True)
@@ -195,15 +200,37 @@ class TranslationResult:
     `TranslateResponse.truncated` used to be passed `False` unconditionally by
     the route — accurate, but unmeasured, which is the same class of defect as
     a fabricated number. These counts make it an observation.
+
+    Segment counts alone are not sufficient. A model handed a repetitive
+    passage can return every segment while silently collapsing content inside
+    them — measured at 5,520 characters in and 1,686 out on a repetitive
+    document, with every segment present. `length_ratio` is what catches that.
     """
 
     text: str
     segments_total: int
     segments_translated: int
+    input_chars: int = 0
+
+    @property
+    def length_ratio(self) -> float | None:
+        """Output characters per input character. None when there was no input."""
+        if not self.input_chars:
+            return None
+        return len(self.text) / self.input_chars
+
+    @property
+    def dropped_reason(self) -> str | None:
+        if self.segments_translated != self.segments_total:
+            return "segment_missing"
+        ratio = self.length_ratio
+        if ratio is not None and ratio < _MIN_LENGTH_RATIO:
+            return "output_length_implausible"
+        return None
 
     @property
     def content_dropped(self) -> bool:
-        return self.segments_translated != self.segments_total
+        return self.dropped_reason is not None
 
 
 def translate_document(
@@ -221,7 +248,7 @@ def translate_document(
     """
     segments = _sentence_aware_chunks(text, _SAFE_CHUNK_CHARS)
     if not segments:
-        return TranslationResult(text="", segments_total=0, segments_translated=0)
+        return TranslationResult(text="", segments_total=0, segments_translated=0, input_chars=0)
 
     translated: list[str] = []
     for index, segment in enumerate(segments):
@@ -238,4 +265,5 @@ def translate_document(
         text=" ".join(translated),
         segments_total=len(segments),
         segments_translated=len(translated),
+        input_chars=len(text),
     )

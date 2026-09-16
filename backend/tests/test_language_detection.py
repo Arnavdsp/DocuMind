@@ -79,3 +79,46 @@ def test_detector_failure_returns_none_rather_than_guessing(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fail_py3langid)
     assert detect_language_offline(ENGLISH) is None
+
+
+# --- content-loss detection (FR-22) -------------------------------------------
+
+
+def test_length_ratio_is_reported_as_a_measurement():
+    from app.services.translation_service import TranslationResult
+
+    result = TranslationResult(text="abcd", segments_total=1, segments_translated=1, input_chars=8)
+    assert result.length_ratio == 0.5
+
+
+def test_no_input_reports_a_null_ratio_not_zero():
+    from app.services.translation_service import TranslationResult
+
+    assert TranslationResult(text="", segments_total=0, segments_translated=0).length_ratio is None
+
+
+def test_missing_segment_is_content_dropped():
+    from app.services.translation_service import TranslationResult
+
+    result = TranslationResult(text="x", segments_total=3, segments_translated=2, input_chars=10)
+    assert result.content_dropped
+    assert result.dropped_reason == "segment_missing"
+
+
+def test_implausibly_short_output_is_caught_even_with_every_segment_present():
+    """The real failure: a model returns every segment but collapses content
+    inside them. Measured at 5,520 chars in and 1,686 out on a repetitive
+    document, with segments 2/2 — segment counting alone called that clean."""
+    from app.services.translation_service import TranslationResult
+
+    result = TranslationResult(text="x" * 1686, segments_total=2, segments_translated=2, input_chars=5520)
+    assert result.content_dropped
+    assert result.dropped_reason == "output_length_implausible"
+
+
+def test_a_normal_translation_is_not_flagged():
+    from app.services.translation_service import TranslationResult
+
+    result = TranslationResult(text="y" * 1050, segments_total=2, segments_translated=2, input_chars=1000)
+    assert not result.content_dropped
+    assert result.dropped_reason is None

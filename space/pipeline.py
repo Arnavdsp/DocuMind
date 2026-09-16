@@ -194,9 +194,7 @@ def summarize(document_id: str):
     if pages is None:
         raise ValueError("That document is not loaded. Read it into memory first.")
     started = time.perf_counter()
-    summary, strategy = summarize_document(
-        pages, model_service=get_model_service(), settings=_settings
-    )
+    summary, strategy = summarize_document(pages, model_service=get_model_service(), settings=_settings)
     return summary, strategy, (time.perf_counter() - started) * 1000
 
 

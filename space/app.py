@@ -41,7 +41,6 @@ os.environ.setdefault("MODEL_DEVICE", "cpu")
 os.environ.setdefault("TRANSLATION_PROVIDER", "groq")
 
 import gradio as gr  # noqa: E402
-
 import pipeline  # noqa: E402
 
 # ZeroGPU requires at least one decorated entry point to schedule a Space.
@@ -159,7 +158,7 @@ def _nodes_svg(citations, total_chunks: int, page_count: int) -> str:
 
     return (
         f'<div class="dm-card"><div class="dm-note" style="margin-bottom:8px">'
-        f'MEMORY NODES · {total_chunks} indexed · {page_count} pages</div>'
+        f"MEMORY NODES · {total_chunks} indexed · {page_count} pages</div>"
         f'<svg viewBox="0 0 {width} {height + 44}" width="100%" style="display:block">'
         f'{"".join(dots)}{legend_label}{"".join(legend)}</svg></div>'
     )
@@ -351,9 +350,7 @@ def do_summarize(document_id):
     if summary.key_findings:
         parts.append("### Key findings\n\n" + "\n".join(f"- {k}" for k in summary.key_findings))
     if summary.important_numbers:
-        parts.append(
-            "### Important numbers\n\n" + "\n".join(f"- {n}" for n in summary.important_numbers)
-        )
+        parts.append("### Important numbers\n\n" + "\n".join(f"- {n}" for n in summary.important_numbers))
     # Absent sections render as an em-dash rather than being hidden, so the
     # reader can tell "the document has no methodology section" from "we did
     # not look".
@@ -378,17 +375,24 @@ def do_translate(document_id, target_language, source_language):
         return f'<div class="dm-card dm-warn">Translation failed: {exc}</div>', ""
 
     origin = "detected" if detected else ("declared" if source != "auto" else "undetermined")
+    reasons = {
+        "segment_missing": "a segment returned nothing",
+        "output_length_implausible": "the output is far shorter than its input",
+    }
     dropped = (
-        '<div class="dm-warn">CONTENT DROPPED — some segments returned nothing.</div>'
+        f'<div class="dm-warn">CONTENT DROPPED — {reasons.get(result.dropped_reason, "see counts")}.' "</div>"
         if result.content_dropped
         else ""
     )
+    ratio = result.length_ratio
     meta = (
         f'<div class="dm-card"><div class="dm-note">TRANSLATION</div><div class="dm-kv">'
         f'<div><span class="k">source</span><span class="v">{source} ({origin})</span></div>'
         f'<div><span class="k">target</span><span class="v">{target}</span></div>'
         f'<div><span class="k">segments</span>'
         f'<span class="v">{result.segments_translated}/{result.segments_total}</span></div>'
+        f'<div><span class="k">length ratio</span>'
+        f'<span class="v">{EM_DASH if ratio is None else f"{ratio:.2f}"}</span></div>'
         f'<div><span class="k">elapsed</span><span class="v">{_ms(elapsed)}</span></div>'
         f'<div><span class="k">provider</span><span class="v">{provider}</span></div>'
         f"</div></div>{dropped}"
@@ -464,8 +468,16 @@ with gr.Blocks(title="DocuMind") as demo:
             with gr.Row():
                 target_lang = gr.Dropdown(
                     label="Target language",
-                    choices=["hi Hindi", "es Spanish", "fr French", "de German",
-                             "ja Japanese", "ar Arabic", "zh-CN Chinese", "en English"],
+                    choices=[
+                        "hi Hindi",
+                        "es Spanish",
+                        "fr French",
+                        "de German",
+                        "ja Japanese",
+                        "ar Arabic",
+                        "zh-CN Chinese",
+                        "en English",
+                    ],
                     value="hi Hindi",
                 )
                 source_lang = gr.Textbox(
@@ -488,9 +500,7 @@ with gr.Blocks(title="DocuMind") as demo:
         "a cut-down version of the other.</div>"
     )
 
-    ingest_btn.click(
-        do_ingest, [upload], [document_id, ingest_error, ingest_summary, ingest_nodes]
-    )
+    ingest_btn.click(do_ingest, [upload], [document_id, ingest_error, ingest_summary, ingest_nodes])
     ask_btn.click(do_ask, [question, document_id], [answer_out, citations_out])
     retr_btn.click(do_retrieve, [retr_question, document_id], [retr_table, retr_note])
     sum_btn.click(do_summarize, [document_id], [sum_meta, sum_out])

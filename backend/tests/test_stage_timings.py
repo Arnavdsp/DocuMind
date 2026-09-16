@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from app.config import get_settings
 from app.rag.chunking import Chunk
 from app.rag.reranker import LexicalOverlapReranker
@@ -84,7 +83,9 @@ def test_nulls_survive_serialization():
 
 def test_total_ms_is_required():
     """Total is always measurable, so it is not nullable."""
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         StageTimings()
 
 

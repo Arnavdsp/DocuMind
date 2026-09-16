@@ -28,7 +28,8 @@ class TranslateResponse(BaseModel):
     provider: str
     truncated: bool = Field(
         default=False,
-        description="True when the document exceeded the provider's safe length and was chunked.",
+        description="True when content was genuinely lost. Mirrors content_dropped. "
+        "Segmentation alone is NOT truncation — see segments_total for that.",
     )
     segments_total: int | None = Field(
         default=None, description="Sentence-boundary segments the input was split into."
@@ -40,5 +41,15 @@ class TranslateResponse(BaseModel):
     )
     content_dropped: bool = Field(
         default=False,
-        description="True when segments_translated < segments_total. Measured, not assumed.",
+        description="True when a segment is missing, or when the output is implausibly "
+        "short for its input. Measured, not assumed.",
+    )
+    dropped_reason: str | None = Field(
+        default=None,
+        description="'segment_missing' | 'output_length_implausible' | null.",
+    )
+    length_ratio: float | None = Field(
+        default=None,
+        description="Output characters per input character. Null when there was no input. "
+        "Reported whether or not it looks suspect, so the reader can judge it.",
     )
