@@ -13,6 +13,7 @@ fabricated number.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,10 +31,52 @@ from app.services.model_service import get_model_service
 from app.services.summarization_service import summarize_document
 from app.services.translation_service import get_translation_provider, translate_document
 
-_settings = get_settings()
-_vector_store = NumpyVectorStore(_settings.index_dir)
+
+def _open_storage():
+    """Settings + vector store, with a fallback that keeps the app alive.
+
+    Both of these run at import and both touch the filesystem: get_settings()
+    calls ensure_dirs(), and NumpyVectorStore mkdirs its index directory. If
+    DATA_DIR is unwritable — a bucket still mounting, a permissions change, a
+    full disk — either raises here, the module never finishes importing, and
+    the Space dies before rendering a single pixel. That failure shows up as a
+    blank 503 with no traceback, which is the worst possible way to learn
+    about a storage problem.
+
+    So a storage failure degrades to a temporary directory and is *reported*
+    on screen instead of taking the app down. Indexes written there do not
+    survive a restart, and the banner says exactly that rather than letting
+    the user assume their uploads are durable.
+    """
+    try:
+        settings = get_settings()
+        return settings, NumpyVectorStore(settings.index_dir), None
+    except Exception as exc:
+        import tempfile
+
+        fallback = Path(tempfile.mkdtemp(prefix="documind-fallback-"))
+        os.environ["DATA_DIR"] = str(fallback)
+        get_settings.cache_clear()
+        settings = get_settings()
+        warning = (
+            f"Configured storage is unavailable ({exc}). Running from a temporary "
+            f"directory instead — indexes will NOT survive a restart."
+        )
+        return settings, NumpyVectorStore(settings.index_dir), warning
+
+
+_settings, _vector_store, _storage_warning = _open_storage()
 _pages_by_document: dict[str, list] = {}
 _titles: dict[str, str] = {}
+
+
+def storage_warning() -> str | None:
+    """Non-null when storage fell back; the UI renders it as a banner."""
+    return _storage_warning
+
+
+def storage_location() -> str:
+    return str(_settings.data_dir)
 
 
 @dataclass(frozen=True)

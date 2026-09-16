@@ -40,6 +40,17 @@ os.environ.setdefault("MODEL_DEVICE", "cpu")
 # against the live Space, not assumed.
 os.environ.setdefault("TRANSLATION_PROVIDER", "groq")
 
+# A bucket is mounted at /data on this Space, so indexes survive a restart
+# instead of being wiped with the container. Only used when the mount is
+# actually present and writable — pipeline falls back to a temporary directory
+# and says so on screen rather than failing to start.
+_DATA_MOUNT = "/data"
+if os.path.isdir(_DATA_MOUNT) and os.access(_DATA_MOUNT, os.W_OK):
+    os.environ.setdefault("DATA_DIR", _DATA_MOUNT)
+    # Model weights land here too. They are ~180 MB that would otherwise be
+    # re-downloaded into ephemeral container disk on every cold start.
+    os.environ.setdefault("HF_HOME", f"{_DATA_MOUNT}/.cache/huggingface")
+
 # SSR is deliberately left at the platform default. Disabling it was tried and
 # the Space then failed to start at all — it never reached "Running on local
 # URL" — so the Node SSR proxy is load-bearing on this tier. Document identity
@@ -236,6 +247,20 @@ def _ms(value: float | None) -> str:
 
 
 def _status_bar() -> str:
+    """Never raises. This runs while the Blocks tree is being built, so an
+    exception here aborts module import and the Space dies with a blank 503
+    and no traceback — the operator learns nothing. A backend that cannot
+    introduce itself is worth reporting, not worth crashing over."""
+    try:
+        return _status_bar_inner()
+    except Exception as exc:
+        return _warn(
+            f"The model backend could not be queried at startup: {exc}. "
+            "The interface is up; individual actions will report their own errors."
+        )
+
+
+def _status_bar_inner() -> str:
     info = pipeline.device_info()
     rows = "".join(
         f'<div><span class="k">{k}</span><span class="v">{v}</span></div>' for k, v in info.items()
@@ -247,10 +272,17 @@ def _status_bar() -> str:
             "page are not meaningful quantities and abstention will not trigger reliably. "
             "Set MODEL_BACKEND and GROQ_API_KEY for real behaviour.</div>"
         )
+    storage = pipeline.storage_warning()
+    if storage:
+        warn += f'<div class="dm-warn">{storage}</div>'
+
     return (
         f'<div class="dm-card"><div class="dm-note">BACKEND</div>'
         f'<div class="dm-kv"><div><span class="k">model</span>'
-        f'<span class="v">{pipeline.backend_name()}</span></div>{rows}</div></div>{warn}'
+        f'<span class="v">{pipeline.backend_name()}</span></div>{rows}'
+        f'<div><span class="k">storage</span>'
+        f'<span class="v">{pipeline.storage_location()}</span></div>'
+        f"</div></div>{warn}"
     )
 
 
