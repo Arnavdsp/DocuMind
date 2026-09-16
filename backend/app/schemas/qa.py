@@ -4,6 +4,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from app.schemas.common import StageTimings
+
 
 class GroundingLevel(str, Enum):
     """A technically-defensible, non-numeric indicator of how well the
@@ -47,3 +49,8 @@ class AskResponse(BaseModel):
     )
     citations: list[Citation] = Field(default_factory=list)
     model_used: str
+    timings_ms: StageTimings | None = Field(
+        default=None,
+        description="Measured per-stage wall-clock time. A stage that did not run "
+        "reports null, never 0, so latency percentiles built from these are honest.",
+    )

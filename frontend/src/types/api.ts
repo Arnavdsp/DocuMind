@@ -36,6 +36,10 @@ export interface DocumentRecord {
   updated_at: string;
   metrics: DocumentSummaryMetrics | null;
   pages: PageInfo[];
+  /** TRUE chunk count from the vector index, recorded at indexing time.
+   *  Null for documents indexed before this was recorded — render as an
+   *  em-dash or fall back to a clearly-labelled estimate, never `?? 0`. */
+  chunk_count: number | null;
   error_message: string | null;
 }
 
@@ -65,6 +69,21 @@ export interface Citation {
   relevance_score: number;
 }
 
+/** Measured wall-clock milliseconds per pipeline stage.
+ *
+ *  `null` means the stage did not run. It is never 0: a zero would be
+ *  indistinguishable from an instantaneous stage and would quietly corrupt
+ *  any percentile computed from these. Render null as an em-dash — never
+ *  coerce it with `?? 0`. */
+export interface StageTimings {
+  embed_ms: number | null;
+  lexical_ms: number | null;
+  fuse_ms: number | null;
+  rerank_ms: number | null;
+  generate_ms: number | null;
+  total_ms: number;
+}
+
 export interface AskResponse {
   conversation_id: string;
   question: string;
@@ -74,6 +93,7 @@ export interface AskResponse {
   relevance_score: number;
   citations: Citation[];
   model_used: string;
+  timings_ms?: StageTimings | null;
 }
 
 export interface StructuredSummary {

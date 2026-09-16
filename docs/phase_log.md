@@ -690,3 +690,72 @@ than silent — the property Phase 0.2 added, working.
 - Summarize and translate are not exposed as tabs yet; `pipeline.summarize`
   exists but has no UI. R4 requires all three pipelines at a phase boundary,
   so this is incomplete against that gate and is recorded as such.
+
+---
+
+## Phase 0.6 — Per-stage timings and true chunk count (FR-30, FR-31)
+
+**Status:** done
+**Tests:** 93 → **114** (21 added, zero existing tests modified)
+**Frontend:** `tsc --noEmit` clean
+
+### FR-30 — per-stage latency (GAP-9)
+
+`StageTimings` on `backend/app/schemas/common.py`, surfaced as
+`AskResponse.timings_ms`.
+
+**Measured inside `retrieve()`, not around it.** `RetrievalResult` gained
+`embed_ms`, `search_ms` and `rerank_ms`, because only that module knows where
+the stage boundaries are — a caller timing `retrieve()` as a whole cannot
+separate embedding from search from reranking without guessing.
+
+**Nullability is the load-bearing property.** A stage that did not run reports
+`null`, never `0`: a zero is indistinguishable from a stage that ran
+instantaneously, and every percentile built from these would be quietly wrong.
+Two cases exercise it:
+
+- retrieval returns nothing → `rerank_ms` is `null` (reranking genuinely did
+  not run), while `embed_ms` and `search_ms` are real measurements
+- the retrieval gate abstains → `generate_ms` is `null`, because no model call
+  was made
+
+`lexical_ms` and `fuse_ms` are declared now and stay `null` until the hybrid
+channel lands, so the field's meaning never changes under a client that
+already reads it. A test asserts both are `null` rather than `0` today.
+
+The Space previously reported `float("nan")` for embed time as an honest
+placeholder; it now reads the real per-stage values, and renders an em-dash
+for any stage that did not run.
+
+### FR-31 — true chunk count (GAP-7)
+
+`DocumentRecord.chunk_count`, persisted at the end of ingestion as
+`len(chunks)` — the count the index actually holds.
+
+SQLite migration is **additive, nullable and idempotent**: `_migrate()` reads
+`PRAGMA table_info(documents)` and adds the column only when absent. No
+destructive DDL. A test constructs a pre-upgrade database by hand and asserts
+it opens, reports `null`, and is **not** back-filled with the old estimate —
+an estimate presented as a measurement is the exact failure this field exists
+to remove.
+
+`COALESCE` on the update means a later status write cannot wipe a recorded
+count, and a measured `0` (an empty index) is preserved as a real measurement
+rather than being confused with "unknown". Both are tested.
+
+**The `~` is gone for measured documents.** `DiskState` gained
+`particleCountMeasured`. `App.tsx` prints the bare number when the count is
+measured and keeps `~` only for the legacy estimate, in both the HUD row and
+the DOM text equivalent. An estimate never appears as a bare authoritative
+number, and a measured count never carries a `~`.
+
+### Note on the remaining `?? 0` occurrences
+
+`04_DATA_SCHEMA_API_DELTA.md` §9 asks for no `?? 0` on any nullable numeric in
+the frontend. Three remain in `App.tsx:159-163` and one in
+`static-fallback.tsx:34`. They are **shader uniforms**, not displayed values:
+WebGL requires a concrete float, and `uDiskLuminosity = 0` is the documented
+empty-state behaviour — with nothing indexed the disk does not glow
+(`MIGRATION.md`). Coercing there fabricates no telemetry; it selects a render
+state. Left as-is deliberately, recorded so the audit in Phase 6 does not
+re-flag them as defects.

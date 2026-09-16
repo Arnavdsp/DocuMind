@@ -419,7 +419,16 @@ export default function App() {
             <div className="hairline my-2 w-[240px]" />
             <TelemetryRow
               label="Disk particles"
-              value={disk.particleCount !== null ? `~${disk.particleCount}` : null}
+              value={
+                disk.particleCount !== null
+                  ? // A measured count is shown bare. Only the legacy estimate,
+                    // used for documents indexed before chunk_count was
+                    // recorded, keeps the "~".
+                    disk.particleCountMeasured
+                    ? `${disk.particleCount}`
+                    : `~${disk.particleCount}`
+                  : null
+              }
             />
             <TelemetryRow
               label="Signal strength"
@@ -563,7 +572,13 @@ export default function App() {
             : "Document metrics not yet available."}
         </p>
         <p>
-          Accretion disk: {disk.particleCount ?? "unknown"} indexed chunks.
+          Accretion disk:{" "}
+          {disk.particleCount === null
+            ? "unknown"
+            : disk.particleCountMeasured
+              ? `${disk.particleCount}`
+              : `approximately ${disk.particleCount}`}{" "}
+          indexed chunks.
           {disk.lowQualityPages > 0
             ? ` ${disk.lowQualityPages} pages flagged low quality.`
             : ""}

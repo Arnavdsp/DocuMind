@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS documents (
     updated_at TEXT NOT NULL,
     metrics_json TEXT,
     pages_json TEXT,
-    error_message TEXT
+    error_message TEXT,
+    chunk_count INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -65,6 +66,20 @@ class Repository:
         self._lock = threading.Lock()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn) -> None:
+        """Additive, nullable, idempotent. Never destructive.
+
+        A document indexed before chunk_count existed reports NULL, which the
+        UI renders as an em-dash. It is deliberately NOT back-filled with the
+        old character-length estimate: an estimate presented as a measurement
+        is the exact failure this field was added to remove.
+        """
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
+        if "chunk_count" not in existing:
+            conn.execute("ALTER TABLE documents ADD COLUMN chunk_count INTEGER")
 
     @contextmanager
     def _connect(self):
@@ -98,18 +113,21 @@ class Repository:
         metrics: DocumentSummaryMetrics | None = None,
         pages: list[PageInfo] | None = None,
         error_message: str | None = None,
+        chunk_count: int | None = None,
     ) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
                 "UPDATE documents SET status = ?, updated_at = ?, "
                 "metrics_json = COALESCE(?, metrics_json), "
                 "pages_json = COALESCE(?, pages_json), "
+                "chunk_count = COALESCE(?, chunk_count), "
                 "error_message = ? WHERE document_id = ?",
                 (
                     status.value,
                     _now(),
                     json.dumps(metrics.model_dump()) if metrics else None,
                     json.dumps([p.model_dump() for p in pages]) if pages is not None else None,
+                    chunk_count,
                     error_message,
                     document_id,
                 ),
@@ -144,6 +162,7 @@ class Repository:
                 DocumentSummaryMetrics(**json.loads(row["metrics_json"])) if row["metrics_json"] else None
             ),
             pages=[PageInfo(**p) for p in json.loads(row["pages_json"])] if row["pages_json"] else [],
+            chunk_count=row["chunk_count"] if "chunk_count" in row.keys() else None,
             error_message=row["error_message"],
         )
 

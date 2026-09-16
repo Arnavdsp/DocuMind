@@ -53,9 +53,11 @@ class AskResult:
     citations: list
     candidates: list
     model_used: str
-    embed_ms: float
-    retrieve_ms: float
-    generate_ms: float
+    # None means the stage did not run — never 0 (NFR-5).
+    embed_ms: float | None
+    search_ms: float | None
+    rerank_ms: float | None
+    generate_ms: float | None
     total_ms: float
 
 
@@ -137,12 +139,14 @@ def ask(document_id: str, question: str) -> AskResult:
         citations=[] if abstained else build_citations(retrieval.candidates),
         candidates=retrieval.candidates,
         model_used=model.backend_name,
-        # Embedding happens inside retrieve(); it is not separately timed here
-        # rather than being guessed at. FR-30 adds per-stage timings in the
-        # backend, at which point this reads them instead of approximating.
-        embed_ms=float("nan"),
-        retrieve_ms=(retrieved_at - started) * 1000,
-        generate_ms=(finished - retrieved_at) * 1000,
+        # Read from the backend's own stage boundaries rather than timed from
+        # out here, which could not separate embed from search from rerank.
+        embed_ms=retrieval.embed_ms,
+        search_ms=retrieval.search_ms,
+        rerank_ms=retrieval.rerank_ms,
+        # Generation is skipped entirely when the retrieval gate abstains, so
+        # its timing is null rather than a near-zero implying a model call.
+        generate_ms=(finished - retrieved_at) * 1000 if retrieval.candidates else None,
         total_ms=(finished - started) * 1000,
     )
 

@@ -137,6 +137,11 @@ def _nodes_svg(citations, total_chunks: int, page_count: int) -> str:
     )
 
 
+def _ms(value: float | None) -> str:
+    """A stage that did not run renders as an em-dash, never as 0 ms."""
+    return EM_DASH if value is None else f"{value:.0f} ms"
+
+
 def _status_bar() -> str:
     info = pipeline.device_info()
     rows = "".join(
@@ -209,8 +214,10 @@ def do_ask(question, state):
         f'<div><span class="k">grounding</span><span class="v">{result.grounding.value}</span></div>'
         f'<div><span class="k">top signal</span><span class="v">{result.top_score:.4f}</span></div>'
         f'<div><span class="k">nodes fired</span><span class="v">{len(result.citations)}</span></div>'
-        f'<div><span class="k">retrieve</span><span class="v">{result.retrieve_ms:.0f} ms</span></div>'
-        f'<div><span class="k">generate</span><span class="v">{result.generate_ms:.0f} ms</span></div>'
+        f'<div><span class="k">embed</span><span class="v">{_ms(result.embed_ms)}</span></div>'
+        f'<div><span class="k">search</span><span class="v">{_ms(result.search_ms)}</span></div>'
+        f'<div><span class="k">rerank</span><span class="v">{_ms(result.rerank_ms)}</span></div>'
+        f'<div><span class="k">generate</span><span class="v">{_ms(result.generate_ms)}</span></div>'
         f'<div><span class="k">total</span><span class="v">{result.total_ms:.0f} ms</span></div>'
         f'<div><span class="k">model</span><span class="v">{result.model_used}</span></div>'
         f"</div></div>"

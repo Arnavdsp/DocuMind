@@ -97,7 +97,13 @@ def run_ingestion(
         )
 
         repository.update_document_status(
-            document_id, status=ProcessingStage.READY, metrics=metrics, pages=page_infos
+            document_id,
+            status=ProcessingStage.READY,
+            metrics=metrics,
+            pages=page_infos,
+            # The count the index actually holds, not an estimate derived from
+            # character length. This is what lets the UI drop its "~" prefix.
+            chunk_count=len(chunks),
         )
         repository.update_job(job_id, status=JobStatus.SUCCEEDED, stage=ProcessingStage.READY, progress=1.0)
         log_event(

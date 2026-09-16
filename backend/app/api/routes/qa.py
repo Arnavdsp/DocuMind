@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from time import perf_counter
 
 from fastapi import APIRouter, Depends
 
@@ -10,8 +11,9 @@ from app.rag.generation import build_citations, generate_grounded_answer
 from app.rag.reranker import Reranker
 from app.rag.retrieval import retrieve
 from app.rag.vector_store import VectorStore
+from app.schemas.common import StageTimings
 from app.schemas.documents import ProcessingStage
-from app.schemas.qa import AskRequest, AskResponse
+from app.schemas.qa import AskRequest, AskResponse, GroundingLevel
 from app.services.model_service import ModelService, get_model_service
 from app.storage.repository import Repository
 from app.utils.errors import DocumentNotFound, DocumentNotReady
@@ -35,6 +37,7 @@ async def ask_document(
     if document.status != ProcessingStage.READY:
         raise DocumentNotReady()
 
+    started = perf_counter()
     result = retrieve(
         document_id=document_id,
         question=request.question,
@@ -43,6 +46,7 @@ async def ask_document(
         reranker=reranker,
         settings=settings,
     )
+    retrieved_at = perf_counter()
 
     answer, abstained = generate_grounded_answer(
         question=request.question,
@@ -51,8 +55,22 @@ async def ask_document(
         model_service=model_service,
         settings=settings,
     )
+    finished = perf_counter()
+
+    # Generation is skipped entirely on an abstention decided by the retrieval
+    # gate, so its timing is null rather than a near-zero number implying a
+    # model call happened.
+    generated = result.grounding != GroundingLevel.NONE and bool(result.candidates)
 
     citations = [] if abstained else build_citations(result.candidates)
+
+    timings = StageTimings(
+        embed_ms=result.embed_ms,
+        # lexical_ms / fuse_ms stay null until the hybrid channel exists.
+        rerank_ms=result.rerank_ms,
+        generate_ms=(finished - retrieved_at) * 1000 if generated else None,
+        total_ms=(finished - started) * 1000,
+    )
 
     return AskResponse(
         conversation_id=request.conversation_id or str(uuid.uuid4()),
@@ -63,4 +81,5 @@ async def ask_document(
         relevance_score=round(min(max(result.top_score, 0.0), 1.0), 4),
         citations=citations,
         model_used=model_service.backend_name,
+        timings_ms=timings,
     )
