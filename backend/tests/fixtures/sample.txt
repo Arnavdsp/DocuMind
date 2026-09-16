@@ -1,0 +1,11 @@
+Photosynthesis Efficiency Report
+
+This study measured photosynthetic efficiency in three plant species under controlled greenhouse conditions. The experiment used a sampling frequency of 20 Hz and ran for 45 days across two growth chambers.
+
+Methodology: Leaf samples were taken every 48 hours and analyzed using chlorophyll fluorescence spectroscopy. Light intensity was held at 400 micromoles per square meter per second.
+
+Findings: Species A showed the highest quantum yield at 0.82, followed by Species B at 0.74 and Species C at 0.61. Water stress reduced quantum yield by an average of 23 percent across all species.
+
+Limitations: The study was limited to a single cultivar per species and did not account for seasonal variation. Sample size per species was 12 plants.
+
+Conclusion: Species A is the most efficient under the tested conditions and is recommended for further field trials.

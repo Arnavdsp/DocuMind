@@ -1,0 +1,91 @@
+"""Centralized, environment-driven application configuration.
+
+Every model name, limit, and secret lives here (sourced from environment
+variables / `.env`) instead of being scattered as string literals across
+the codebase. This is what lets the model layer be swapped without
+touching business logic, and keeps secrets out of source control.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+
+    # --- Service identity -------------------------------------------------
+    app_name: str = "Document Intelligence Suite"
+    environment: Literal["development", "colab", "production"] = "development"
+    log_level: str = "INFO"
+
+    # --- Storage ------------------------------------------------------------
+    data_dir: Path = Path("./data")
+
+    # --- Upload / security limits -------------------------------------------
+    max_upload_bytes: int = 25 * 1024 * 1024  # 25 MB
+    max_pages_per_document: int = 300
+    max_image_pixels: int = 40_000_000  # guards decompression-bomb style images
+    allowed_extensions: tuple[str, ...] = (".pdf", ".txt", ".jpg", ".jpeg", ".png")
+    allowed_mime_types: tuple[str, ...] = (
+        "application/pdf",
+        "text/plain",
+        "image/jpeg",
+        "image/png",
+    )
+    request_timeout_seconds: int = 120
+
+    # --- Chunking -------------------------------------------------------------
+    chunk_target_tokens: int = 220
+    chunk_overlap_tokens: int = 40
+
+    # --- Retrieval -------------------------------------------------------------
+    retrieval_top_k: int = 8
+    rerank_top_k: int = 4
+    min_relevance_score: float = 0.18  # below this, the system abstains
+
+    # --- Model configuration (names only — loading lives in services/models) ---
+    embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2")
+    generation_model: str = Field(default="microsoft/Phi-3-mini-128k-instruct")
+    qa_model: str = Field(default="deepset/roberta-base-squad2")
+    reranker_model: str | None = Field(default=None)  # optional cross-encoder
+    translation_provider: Literal["google", "none"] = "google"
+
+    # --- Model runtime behavior ---
+    model_backend: Literal["auto", "hf", "mock"] = "auto"
+    generation_max_new_tokens: int = 500
+    generation_temperature: float = 0.0
+
+    # --- Secrets (never logged, never sent to the frontend) ---
+    ngrok_authtoken: str | None = None
+
+    # --- CORS ---
+    cors_allow_origins: tuple[str, ...] = ("http://localhost:5173", "http://localhost:8000")
+
+    @property
+    def documents_dir(self) -> Path:
+        return self.data_dir / "documents"
+
+    @property
+    def index_dir(self) -> Path:
+        return self.data_dir / "index"
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "app.db"
+
+    def ensure_dirs(self) -> None:
+        for d in (self.data_dir, self.documents_dir, self.index_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    settings.ensure_dirs()
+    return settings

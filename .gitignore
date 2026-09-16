@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/tools/render-check/*.png
+
+# Application data — documents, the SQLite metadata DB, and the .npz vector
+# index are all runtime state. None of it belongs in version control, and
+# uploaded documents may be sensitive.
+data/
+*.db
+*.npz
+
+# Secrets
+.env
+.env.local
+backend/.env
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

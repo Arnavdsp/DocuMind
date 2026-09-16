@@ -1,0 +1,31 @@
+# Real deployment path. Unlike the Colab notebook — which is a reproducible
+# demo environment whose runtime recycles and whose URL is ephemeral — this
+# runs the same application code against a persistent volume.
+services:
+  gargantua:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ENVIRONMENT: production
+      DATA_DIR: /data
+      # Without a GPU in the container this will be slow. Point it at a
+      # GPU runtime, or set MODEL_BACKEND=mock for a smoke-test deployment
+      # and accept that the scores mean nothing.
+      MODEL_BACKEND: auto
+    volumes:
+      # Documents, the SQLite metadata DB and the per-document .npz vector
+      # indexes all live here. Losing this volume loses every index.
+      - gargantua-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  gargantua-data:
