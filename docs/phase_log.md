@@ -1179,3 +1179,71 @@ since `pipeline.py` does filesystem work at import. That hardening (fallback
 to a temporary directory with an on-screen banner, and a `_status_bar()` that
 cannot raise) is retained regardless of whether a bucket is mounted — it
 applies to any unwritable `DATA_DIR`.
+
+---
+
+## Phase 0.12 — "Only translation works" — it wasn't a failure
+
+Second screencast. Frame analysis showed the opposite of what was reported:
+nothing had crashed.
+
+Frame at 0:70 shows `MEMORY NODES · 4 INDEXED · 2 PAGES` — `AA-312.pdf`
+ingested fine. It has a text layer, so the missing `tesseract` binary was
+never involved. Translation rendered the document and revealed what it is: a
+**physics question paper** (blackbody radiation, greenhouse effect, lapse
+rates), numbered 1–11.
+
+That explains both complaints:
+
+- **The summary.** In the earlier frame the document handle was still empty,
+  so `Summarize` correctly reported "read a document into memory first".
+  Reproduced against the live Space with an equivalent question paper:
+  summarization returns a real structured summary in ~300 ms.
+- **The question.** Reproduced too — and the system was right. Asking
+  *"Why does the stratosphere get warmer with height?"* is **verbatim question
+  4 of the document**. Retrieval scored `0.5165`, well above the floor, and the
+  generator then declined: the document poses that question, it does not
+  answer it.
+
+### BUG-7 — The UI blamed retrieval for a generator decision
+
+Both outcomes rendered as `NO PATHWAY ACTIVATED … the strongest signal reached
+0.5165`. A reader sees a high score beside a message saying nothing was found.
+They are two different events and were being reported as one:
+
+| Cause | What actually happened |
+|---|---|
+| `retrieval` | Nothing scored above `min_relevance_score`; the document has no passage on the topic |
+| `generator` | Passages were retrieved and scored well, but contain no answer |
+
+`AskResult.abstain_kind` now distinguishes them. A generator abstention reads
+**"EVIDENCE FOUND, BUT IT DOES NOT ANSWER THIS"**, states that retrieval
+worked and at what score, and — the important part — **shows the retrieved
+passages**, which were previously discarded on any abstention. Those passages
+are the explanation: on-topic, and answerless.
+
+Verified live on the question paper:
+
+| Question | Result |
+|---|---|
+| "Why does the stratosphere get warmer with height?" | generator abstention, 0.5165, 2 passages shown |
+| "What is the greenhouse effect?" | **answered** with citations |
+| "What is the capital of Brazil?" | generator abstention, **0.1870** |
+
+### The threshold is demonstrably miscalibrated (GAP-6)
+
+"What is the capital of Brazil?" is completely unrelated to a physics paper,
+and it **cleared the 0.18 floor by 0.007**. It was only caught because the
+generator refused.
+
+That is not a safety margin — it is the uncalibrated constant `00` §2 flags as
+GAP-6, now with a concrete failure case attached. The abstention gate is
+currently doing very little work on this corpus; the generator is carrying it.
+This is exactly what the threshold sweep in `03` §5.2 exists to fix, and it is
+now the strongest argument for doing the eval harness next.
+
+### Still not reproduced
+
+`tesseract` remains uninstalled, so a **scanned** PDF (no text layer) would
+still be rejected. `AA-312.pdf` was not such a document, so BUG-5's user-facing
+impact is smaller than assumed — but the gap is real and unfixed.

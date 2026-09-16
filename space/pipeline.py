@@ -97,6 +97,16 @@ class AskResult:
     citations: list
     candidates: list
     model_used: str
+    # Which of the two very different abstentions happened, if either:
+    #   "retrieval" — nothing scored above the floor; the document has no
+    #                 passage on this topic at all.
+    #   "generator" — passages WERE retrieved and scored well, but they do not
+    #                 contain an answer. A question paper is the clean example:
+    #                 it holds the question, not the answer.
+    # Reporting both as "no pathway activated" blames retrieval for a
+    # generator decision and leaves the reader staring at a high score next to
+    # a message saying nothing was found.
+    abstain_kind: str | None
     # None means the stage did not run — never 0 (NFR-5).
     embed_ms: float | None
     search_ms: float | None
@@ -175,14 +185,27 @@ def ask(document_id: str, question: str) -> AskResult:
     )
     finished = time.perf_counter()
 
+    if not abstained:
+        abstain_kind = None
+    elif retrieval.grounding == GroundingLevel.NONE or not retrieval.candidates:
+        abstain_kind = "retrieval"
+    else:
+        abstain_kind = "generator"
+
     return AskResult(
         answer=answer,
         abstained=abstained,
         grounding=retrieval.grounding,
         top_score=retrieval.top_score,
-        citations=[] if abstained else build_citations(retrieval.candidates),
+        # On a generator abstention the passages are still worth showing: they
+        # are what the model looked at and rejected, which is the whole
+        # explanation the reader needs.
+        citations=(
+            build_citations(retrieval.candidates) if not abstained or abstain_kind == "generator" else []
+        ),
         candidates=retrieval.candidates,
         model_used=model.backend_name,
+        abstain_kind=abstain_kind,
         # Read from the backend's own stage boundaries rather than timed from
         # out here, which could not separate embed from search from rerank.
         embed_ms=retrieval.embed_ms,

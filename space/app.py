@@ -383,12 +383,33 @@ def do_ask(question, document_id):
     except Exception as exc:
         return f'<div class="dm-card dm-warn">That request failed: {exc}</div>', ""
 
-    if result.abstained:
+    if result.abstained and result.abstain_kind == "generator":
+        # Retrieval succeeded; the passages simply do not answer the question.
+        # Saying "no pathway activated" here would blame retrieval for a
+        # generator decision, next to a score that plainly shows retrieval
+        # worked. The passages are shown because they are the explanation.
+        answer = (
+            f'<div class="dm-card dm-abstain"><div class="dm-note" style="margin-bottom:6px">'
+            f"EVIDENCE FOUND, BUT IT DOES NOT ANSWER THIS</div>{result.answer}"
+            f"<div class='dm-note' style='margin-top:8px'>Retrieval worked — the top passage "
+            f"scored {result.top_score:.4f}, above the "
+            f"{pipeline._settings.min_relevance_score} floor. The passages below are what was "
+            f"retrieved; they are on-topic but contain no answer. A document that poses a "
+            f"question without answering it produces exactly this.</div></div>"
+        )
+        lines = []
+        for i, c in enumerate(result.citations, start=1):
+            page = f"page {c.page_number}" if c.page_number else EM_DASH
+            lines.append(f"**[{i}]** {page} · relevance `{c.relevance_score:.4f}`\n\n> {c.snippet}\n")
+        citations_md = "\n".join(lines)
+    elif result.abstained:
         answer = (
             f'<div class="dm-card dm-abstain"><div class="dm-note" style="margin-bottom:6px">'
             f"NO PATHWAY ACTIVATED</div>{result.answer}"
             f"<div class='dm-note' style='margin-top:8px'>A designed response, not an error. "
-            f"The strongest signal reached {result.top_score:.4f}.</div></div>"
+            f"Nothing in the document scored above the "
+            f"{pipeline._settings.min_relevance_score} floor; the strongest signal reached "
+            f"{result.top_score:.4f}.</div></div>"
         )
         citations_md = ""
     else:
