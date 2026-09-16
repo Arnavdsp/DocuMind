@@ -32,12 +32,21 @@ async def translate(
     full_text = "\n\n".join(p.text for p in pages if p.text)
 
     provider = get_translation_provider(settings.translation_provider)
-    source_language = request.source_language or provider.detect_language(full_text)
+
+    # Three distinct cases, kept distinct: the caller declared it, the detector
+    # found it, or nobody knows. The third is reported as "auto" — the value
+    # actually sent to the provider — rather than defaulted to a real language
+    # code, which would put a fabricated fact on the response.
+    declared = request.source_language
+    detected = provider.detect_language(full_text) if not declared else None
+    source_language = declared or detected or "auto"
+
     translated = provider.translate(full_text, source=source_language, target=request.target_language)
 
     return TranslateResponse(
         document_id=document_id,
         source_language=source_language,
+        source_language_detected=detected is not None,
         target_language=request.target_language,
         translated_text=translated,
         provider=provider.name,

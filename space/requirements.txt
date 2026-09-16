@@ -1,0 +1,30 @@
+# Space runtime. Superset of backend/requirements.txt plus the UI layer.
+#
+# torch and sentence-transformers are needed for the local embedder and
+# cross-encoder only. Generation is an HTTP call to Groq, so no GPU is used
+# and no visitor GPU quota is consumed.
+
+gradio==6.27.0
+spaces
+
+# --- backend core (mirrors backend/requirements.txt) ---
+pydantic==2.13.5
+pydantic-settings==2.15.0
+numpy==2.4.4
+
+# --- ingestion ---
+pdfplumber==0.11.9
+pytesseract==0.3.13
+pillow==12.1.1
+
+# --- generation over HTTP ---
+httpx==0.28.1
+
+# --- translation + offline language id ---
+deep-translator==1.11.4
+py3langid==0.3.0
+
+# --- local models (CPU) ---
+torch
+sentence-transformers>=3.2,<4.0
+transformers>=4.46,<5.0

@@ -57,12 +57,29 @@ class Settings(BaseSettings):
     translation_provider: Literal["google", "none"] = "google"
 
     # --- Model runtime behavior ---
-    model_backend: Literal["auto", "hf", "mock"] = "auto"
+    # "groq" routes generation to the Groq API and keeps embedding and
+    # cross-encoder work local; "auto" never selects it, so a missing key can
+    # never silently change which backend answers.
+    model_backend: Literal["auto", "hf", "mock", "groq"] = "auto"
     generation_max_new_tokens: int = 500
     generation_temperature: float = 0.0
 
+    # --- Groq generation backend ---
+    # Only the model name and transport settings live here. The credential is
+    # read from the environment (see the Secrets section) and is never written
+    # to a file in this repository.
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "openai/gpt-oss-20b"
+    # gpt-oss models emit internal reasoning tokens that count against the
+    # free tier's tokens-per-minute budget. On grounded extraction the answer
+    # is unchanged between efforts, so the cheapest one is the default.
+    groq_reasoning_effort: Literal["low", "medium", "high"] | None = "low"
+    groq_timeout_seconds: float = 60.0
+    groq_max_retries: int = 4
+
     # --- Secrets (never logged, never sent to the frontend) ---
     ngrok_authtoken: str | None = None
+    groq_api_key: str | None = None
 
     # --- CORS ---
     cors_allow_origins: tuple[str, ...] = ("http://localhost:5173", "http://localhost:8000")

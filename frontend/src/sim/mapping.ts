@@ -19,6 +19,7 @@
    | SIGNAL LOST           | abstained === true                   | AskResponse   |
    | mission elapsed       | time since ingestion completed       | job timestamps|
    | inference backend     | model_used / backend_name            | model_used    |
+   | transit time          | measured per-stage latency           | timings_ms    |
    ========================================================================= */
 
 import type {
@@ -27,6 +28,7 @@ import type {
   GroundingLevel,
   PageInfo,
   ProcessingStage,
+  StageTimings,
 } from "../types/api";
 
 /** Retrieval fan-out, mirrored from backend settings (retrieval_top_k=8,
@@ -106,6 +108,11 @@ export function deriveMass(document: DocumentRecord | null): MassState {
 export interface DiskState {
   /** Particle count in the accretion disk === chunks in the vector index. */
   particleCount: number | null;
+  /** True when particleCount is the index's real count rather than an
+   *  estimate. Documents indexed before chunk_count was recorded report
+   *  false, and the HUD marks those with "~". A measured count is never
+   *  shown with a "~", and an estimate is never shown without one. */
+  particleCountMeasured: boolean;
   /** 0..1 luminosity, from index density (chunks per page). Null if unknown. */
   luminosity: number | null;
   /** 0..1 fraction of pages whose extraction is trustworthy. Drives the
@@ -121,10 +128,13 @@ export interface DiskState {
  * aesthetic choice of "about a thousand sparks", the actual number of
  * vectors the store holds for this document.
  *
- * Chunk count is not returned directly by any endpoint, so it is estimated
- * from character count and the backend's chunk_target_tokens/overlap. That
- * estimate is explicitly labelled as an estimate wherever it surfaces as
- * text; it never appears as a bare authoritative number.
+ * The backend now records the true chunk count at indexing time, so for any
+ * document indexed since then this is the measured number and carries no
+ * "~". Documents indexed earlier have no recorded count; rather than
+ * back-filling them with a number nobody measured, they fall back to the
+ * estimate below, and `particleCountMeasured` is false so the HUD marks it
+ * with a "~". An estimate never appears as a bare authoritative number, and
+ * a measured count never carries the "~".
  */
 export function deriveDisk(
   document: DocumentRecord | null,
@@ -134,6 +144,7 @@ export function deriveDisk(
   if (!document || document.status !== "ready" || !document.metrics) {
     return {
       particleCount: null,
+      particleCountMeasured: false,
       luminosity: null,
       integrity: null,
       lowQualityPages: 0,
@@ -146,7 +157,13 @@ export function deriveDisk(
   // advance per chunk once overlap is subtracted.
   const approxTokens = chars / 4;
   const stride = Math.max(chunkTargetTokens - overlapTokens, 1);
-  const particleCount = Math.max(1, Math.round(approxTokens / stride));
+
+  // Prefer the measured count. `?? null` rather than `?? estimate` at the
+  // top level so the two cases stay distinguishable: a measured 0 is a real
+  // measurement of an empty index and must not silently become an estimate.
+  const measured = document.chunk_count ?? null;
+  const particleCountMeasured = measured !== null;
+  const particleCount = measured ?? Math.max(1, Math.round(approxTokens / stride));
 
   const density = pages > 0 ? particleCount / pages : particleCount;
   const luminosity = clamp(density / 12, 0.05, 1);
@@ -159,7 +176,14 @@ export function deriveDisk(
   const integrity =
     pageInfos.length > 0 ? 1 - lowQualityPages / pageInfos.length : null;
 
-  return { particleCount, luminosity, integrity, lowQualityPages, ocrPages };
+  return {
+    particleCount,
+    particleCountMeasured,
+    luminosity,
+    integrity,
+    lowQualityPages,
+    ocrPages,
+  };
 }
 
 /* -------------------------------------------------------------------------
@@ -245,6 +269,9 @@ export interface SignalState {
   /** Hot-spot positions on the disk, 0..1 around the ring, by page number. */
   hotspots: Hotspot[];
   modelUsed: string | null;
+  /** Measured per-stage latency. Null stages did not run and render as an
+   *  em-dash; never coerce with `?? 0`, which would fabricate a measurement. */
+  timings: StageTimings | null;
 }
 
 export interface Hotspot {
@@ -266,6 +293,7 @@ export const EMPTY_SIGNAL: SignalState = {
   captured: 0,
   hotspots: [],
   modelUsed: null,
+  timings: null,
 };
 
 export function deriveSignal(
@@ -317,6 +345,9 @@ export function deriveSignal(
     captured: Math.max(RETRIEVAL_TOP_K - survived, 0),
     hotspots,
     modelUsed: answer.model_used,
+    // Passed through untouched. An older backend omits the field entirely,
+    // which stays null and renders as an em-dash rather than becoming zeros.
+    timings: answer.timings_ms ?? null,
   };
 }
 

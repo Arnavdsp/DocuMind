@@ -342,3 +342,420 @@ Network-free and GPU-free. Test count recorded at **48** across 11 modules:
 `test_api_documents` 9, `test_document_validation` 8, `test_retrieval` 5,
 `test_translation` 5, `test_api_qa` 4, `test_api_summary` 4, `test_chunking` 4,
 `test_rag` 4, `test_pdf_extraction` 3, `test_ocr` 2.
+
+---
+
+## Phase 0.2 — Groq generation backend
+
+**Status:** done
+**Tests:** 48 before → **63 after** (15 added, zero existing tests modified)
+
+### Why
+
+Generation moves from a locally-loaded `microsoft/Phi-3-mini-128k-instruct`
+to the Groq API. Groq serves chat completions only — no embeddings, no
+cross-encoders — so this is a composition, not a replacement: `generate` goes
+over the wire, `embed` and `get_cross_encoder` stay local on CPU.
+
+`HFModelService.generate` already built a `messages` list from a system and a
+user prompt, so the call shape maps onto Groq's chat completions endpoint
+without touching `rag/generation.py` or any call site.
+
+### Consequence worth recording
+
+With generation off-box, **nothing in the pipeline needs a GPU.** The
+embedding model (`all-MiniLM-L6-v2`, ~90 MB) and the cross-encoder
+(`ms-marco-MiniLM-L-6-v2`, ~90 MB) both run acceptably on CPU. The eval
+harness can therefore run on any CPU box, with no Colab session and no daily
+GPU quota — which removes the constraint that shapes most of the deployment
+plan's resource budgeting.
+
+### Free-tier facts, measured not assumed
+
+Against `https://api.groq.com/openai/v1` on 2026-09-16:
+
+| Observation | Value |
+|---|---|
+| Models available | 13 |
+| Candidates with a usable context window | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `qwen/qwen3.8-27b` — all 131k |
+| Rate limit, requests | 1000 / min |
+| Rate limit, **tokens** | **8000 / min** — the binding constraint |
+| Round trip, grounded 2-passage question | ~223 ms |
+
+**Chosen default: `openai/gpt-oss-20b`.** `groq/compound` and
+`compound-mini` were rejected despite fitting the context budget: they are
+agentic systems with built-in tool access, and a generator that can reach the
+open web cannot honour "answer using ONLY the numbered evidence passages".
+That would silently break groundedness, which is the property this project is
+built to defend.
+
+**`reasoning_effort` is set to `low`.** gpt-oss models emit internal reasoning
+tokens billed against the 8000 TPM ceiling. Measured on one grounded
+extraction question:
+
+| effort | reasoning tokens | total tokens | answer |
+|---|---|---|---|
+| low | 31 | 169 | identical |
+| medium | 54 | 191 | identical |
+| high | 91 | 228 | identical |
+
+Same answer, 26% fewer tokens at `low`. On a token-per-minute budget that is
+throughput, so `low` is the default and the setting is exposed rather than
+hardcoded.
+
+### Design decisions
+
+**`auto` never selects `groq`.** Routing generation off-box is an explicit
+choice; a key appearing in the environment must not silently change which
+backend answers, because `model_used` and every eval number are attributed to
+it.
+
+**`backend_name` reports both halves.** When the local delegate is the mock,
+it returns `groq:<model> (embeddings: mock)` rather than plain `groq:<model>`.
+Generation being real while retrieval scores are meaningless is exactly the
+half-working state the existing mock-backend warning exists for, and the UI
+renders this string directly.
+
+**A missing key raises; it does not fall back.** Degrading to another backend
+on a missing credential would make `model_used` a lie.
+
+**`extractive_qa` raises on this backend.** Per D7 it has no call site
+anywhere in the application, so standing up a span-extraction model to satisfy
+the ABC would download ~500 MB that nothing consumes. It raises rather than
+returning a fabricated span with a fabricated score.
+
+**Retry policy distinguishes retryable from not.** 429 and 5xx back off and
+retry (honouring `Retry-After` when present); other 4xx raise immediately,
+because a bad key or a bad model name will not resolve on retry and retrying
+burns the rate-limit budget.
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `backend/app/config.py` | `model_backend` gains `"groq"`; new `groq_base_url`, `groq_model`, `groq_reasoning_effort`, `groq_timeout_seconds`, `groq_max_retries`; `groq_api_key` added to the existing Secrets section |
+| `backend/app/services/model_service.py` | new `GroqModelService`, `_sleep_backoff`; `get_model_service` routes `"groq"` |
+| `backend/requirements.txt` | `httpx==0.28.1` |
+| `.env.example` | Groq section; credential documented by **name only**, with the four places it is supplied |
+| `backend/tests/test_groq_backend.py` | new, 15 tests, network-free |
+
+### Verification
+
+```
+$ MODEL_BACKEND=mock pytest backend/tests -q
+63 passed
+
+$ grep -rln "import torch\|from transformers" backend/app/
+backend/app/services/model_service.py
+```
+
+Torch containment (R6) holds — the new backend imports neither, because the
+local delegate owns that.
+
+Live check through `GroqModelService` with the project's real
+`_SYSTEM_PROMPT`, two evidence passages:
+
+- grounded question → `Recall@4 for the hybrid configuration was 71.2 percent [1].`
+- unanswerable question → `I don't have enough information in this document to answer that.`
+
+Abstention behaviour survives the backend change.
+
+### Credential handling
+
+No key is committed. `groq_api_key` is read from the environment by the
+existing pydantic-settings mechanism, exactly as `ngrok_authtoken` already
+was. `.gitignore` already covers `.env`, `.env.local` and `backend/.env`.
+A test asserts the key does not appear in the text of a raised
+`ModelUnavailable`, since those messages reach logs and error handlers.
+
+### Deviation
+
+`03_EVAL_BENCHMARK_PLAN.md` §4.2 forbids "LLM-as-judge on a paid API". Groq's
+free tier is not a paid API, but an optional LLM judge running on the same
+endpoint as the generator would be judging its own family's output. If a judge
+is used at all it must be disclosed under the §4.2 constraints, and it remains
+a secondary signal — no claim rests on it alone.
+
+---
+
+## Phase 0.3 — Deterministic mock cross-encoder (FR-10, GAP-10, D6)
+
+**Status:** done
+**Tests:** 63 → **77** (14 added, zero existing tests modified)
+
+### The defect
+
+`MockModelService.get_cross_encoder` **raised** `ModelUnavailable`, and
+`CrossEncoderReranker.rerank` calls it with no `try`/`except`. So setting
+`reranker_model` while on the mock backend produced an uncaught exception and
+a 500 — not a graceful fallback.
+
+`00_CURRENT_STATE_AUDIT.md` describes the mock as one that "presumably returns
+`None` or a stub". It did neither. The practical consequence was that no
+assertion about rerank ordering could be written without a GPU and a
+multi-gigabyte download, so none were.
+
+### What was added
+
+`_MockCrossEncoder` with a `predict(pairs) -> list[float]` shape matching
+`sentence_transformers.CrossEncoder`. Scores are token overlap weighted toward
+longer tokens (standing in for the rarer, more discriminative terms a real
+cross-encoder keys on), plus a SHA-256-derived tie-break so equal-overlap
+pairs have a total order that does not depend on list position or dict
+iteration.
+
+`score_kind` is `"mock_cross_encoder"`, so a mock score can never be mistaken
+for a real one.
+
+**Deliberately bounded to [0, 1].** A real cross-encoder emits unbounded
+logits, but `Citation.relevance_score` is currently clamped to `[0, 1]`
+(D2), so emitting logits here would fabricate values through that clamp.
+Phase 2 moves the cross-encoder onto its own kind-labelled field; until then
+the mock stays inside the existing range rather than making D2 worse.
+
+### What did not change
+
+`config.reranker_model` still defaults to `None`, so `build_reranker` still
+returns `LexicalOverlapReranker` and default behaviour is untouched. A test
+asserts this.
+
+### Not fixed here, deliberately
+
+`CrossEncoderReranker` still has no `try`/`except` around `get_cross_encoder`,
+so a genuine load failure on the HF backend still raises rather than
+degrading visibly. That is FR-8's job — the fallback must be *reported*
+(`applied: false` plus a `fallback_reason`), not merely caught — and it needs
+`RerankerInfo` on the response, which is Phase 2. Catching it here without
+somewhere to report it would convert a loud failure into a silent downgrade,
+which is worse.
+
+---
+
+## Phase 0.4 — Offline source-language detection (D5)
+
+**Status:** done
+**Tests:** 77 → **85** (8 added, zero existing tests modified)
+
+### The defect
+
+`translation_service.py` called:
+
+```python
+return single_detection(text[:500], api_key=None) or "en"
+```
+
+`deep_translator.single_detection` requires a detectlanguage.com API key.
+Called with `api_key=None` it raises on **every** invocation, and the
+surrounding `except Exception: return "en"` caught it. Source-language
+detection was therefore hardcoded to English — no error, no warning — and
+`TranslateResponse.source_language` reported `"en"` as a measured fact for
+every document in every language.
+
+### The fix
+
+`detect_language_offline()` using **py3langid**, which carries its model as
+bundled package data: no network call, no API key, no runtime download, so
+NFR-8 holds. Measured cold: import plus four classifications in 0.57 s,
+correct on English, French, German and Hindi.
+
+It returns `str | None`. **None is a real answer** — returning a plausible
+default is what caused the original defect.
+
+### Schema change (additive)
+
+`TranslateResponse` gains `source_language_detected: bool = False`. The three
+cases are now distinguishable by a client:
+
+| Case | `source_language` | `source_language_detected` |
+|---|---|---|
+| Caller declared it | the declared code | `false` |
+| Detector identified it | the detected code | `true` |
+| Neither | `"auto"` | `false` |
+
+`"auto"` is the value actually passed to the provider, so it reports what
+happened rather than asserting a language nobody determined.
+`source_language` keeps its existing type (`str`, non-nullable), so R2 holds
+and existing clients are unaffected.
+
+### New finding
+
+**D9 — `TranslateResponse.truncated` is hardcoded to `False`.**
+`api/routes/translate.py` passes `truncated=False` unconditionally. The
+provider does segment long input via `_sentence_aware_chunks`, so the field
+reports a constant rather than an observation. It happens to be *accurate*
+today (segmentation is not truncation, and nothing is dropped), but it is a
+fabricated value in the NFR-5 sense: nothing measures it.
+
+Not fixed here. Reporting it truthfully requires `translate()` to return
+segment counts rather than a bare string, which is the FR-22 work in Phase
+0.6 along with `segments_total` / `segments_translated` / `content_dropped`.
+Recorded so it is not lost.
+
+---
+
+## Phase 0.5 — DocuMind Space (out of plan order, by request)
+
+**Status:** built and verified locally; deploy pending authentication
+**Tests:** 85 → **93** (8 added, zero existing tests modified)
+
+### Ordering deviation
+
+The roadmap puts deployment in Phase 5, after the eval harness and the frozen
+baseline. This was built at Arnav's request while Phase 0 is still in
+progress. The consequence is recorded rather than hidden: **the Evidence tab
+has no numbers**, because no evaluation has been run yet. It renders an
+all-em-dash table and says explicitly that the harness has not run. That is
+the project's own rule applied to itself — an unmeasured value is an em-dash,
+not a plausible placeholder.
+
+### Free-tier rules, re-verified (RISK-5, `05` §7)
+
+Checked against the official `huggingface-spaces` skill on 2026-09-16:
+
+| Claim in `05` §1 | Verdict |
+|---|---|
+| Free accounts cannot create a Docker or plain CPU Gradio Space | **confirmed** — Gradio and Docker Spaces need a paid plan; `cpu-basic` is gated too |
+| Free accounts get Static Spaces and ZeroGPU Gradio Spaces | **confirmed** |
+| ZeroGPU cap of 2 Spaces per free account | **confirmed** |
+| "~5 minutes of shared GPU time per day" for the account | **corrected** — the Space creator is not charged; each *visitor* consumes their own daily quota (~5 min free tier). The plan's arithmetic of "40–60 visitor interactions per day" understated capacity. |
+
+**One fact changes the design.** The skill documents that a CPU-bound or
+API-proxy Space on a free account should use `zero-a10g` with a single no-op
+`@spaces.GPU` function — ZeroGPU requires at least one — while keeping the
+real work outside it, so no quota is ever consumed.
+
+That fits exactly. Generation is a Groq HTTP call, and both local models
+(MiniLM embedder ~90 MB, cross-encoder ~90 MB) run acceptably on CPU. So
+DocuMind schedules on ZeroGPU without ever requesting a GPU. The quota-anxiety
+that shapes most of `05` §3.2 does not apply.
+
+### Metaphor decision
+
+The black-hole framing is not just naming: `schwarzschild.frag.glsl` is a real
+null-geodesic raytracer and `sim/mapping.ts` binds RAG state to physics.
+Renaming it "a mind" while the shader still renders a black hole would put a
+label on screen that contradicts the pixels — the same failure the project
+defines itself against.
+
+**Resolved:** DocuMind is its own surface with its own visual language — a
+document becomes memory nodes, a question becomes a signal, retrieved nodes
+fire, and abstention is "no pathway activated". The raytracer keeps the
+Gargantua identity and stays the Colab surface. The Space README states plainly
+that neither is a cut-down version of the other.
+
+### Structure
+
+| Path | Role |
+|---|---|
+| `space/app.py` | Gradio Blocks UI, DocuMind identity. Presentation only. |
+| `space/pipeline.py` | Thin adapter. Imports `app.rag.*` and `app.services.*`; defines no retrieval logic. |
+| `space/README.md` | Space card with frontmatter |
+| `space/requirements.txt` | Space runtime |
+| `tools/build_space.py` | Assembles a flat deploy bundle from the real tree |
+
+A Space repo must be flat — `app.py` at the root with its imports resolvable —
+but this repository keeps the application under `backend/app/`. The bundle is
+therefore **generated**, mirroring what `tools/build_notebook.py` already does
+for the Colab notebook, rather than maintaining a second hand-kept copy of
+`backend/app/`. `build/` is gitignored.
+
+`backend/tests/test_space_bundle.py` enforces the rule by AST inspection:
+neither `space/` file may define `retrieve`, `rerank`, `chunk_document`,
+`classify_grounding`, `generate_grounded_answer` or the fusion functions, and
+`pipeline.py` must import them from `app.*`.
+
+### Verified locally
+
+Bundle built (47 files), then run end to end against the real Groq API on a
+document containing known figures:
+
+| Question | Result |
+|---|---|
+| "What was the recall@4 for the hybrid configuration?" | answered `71.2 percent` with citation, grounding `strong`, top score 0.6807 |
+| "What was the p95 latency on the fast path?" | answered `980 milliseconds` with citation |
+| "What is the airspeed velocity of an unladen swallow?" | **abstained** |
+
+The run also exercised the disclosure path: `torch` was absent from the local
+environment, so the delegate fell back to mock embeddings and `backend_name`
+reported `groq:openai/gpt-oss-20b (embeddings: mock)`, which the UI renders as
+a banner. Real generation over meaningless retrieval scores was visible rather
+than silent — the property Phase 0.2 added, working.
+
+### Not done
+
+- Not deployed. `hf auth login` is a device flow requiring Arnav to authorise
+  in a browser; per R8 no credential is generated or requested inline.
+- No preloaded corpus yet (`05` §2.1 wants 2–3 eval documents indexed at build
+  time). That depends on the eval corpus, which is Phase 0.5 of the roadmap.
+- Summarize and translate are not exposed as tabs yet; `pipeline.summarize`
+  exists but has no UI. R4 requires all three pipelines at a phase boundary,
+  so this is incomplete against that gate and is recorded as such.
+
+---
+
+## Phase 0.6 — Per-stage timings and true chunk count (FR-30, FR-31)
+
+**Status:** done
+**Tests:** 93 → **114** (21 added, zero existing tests modified)
+**Frontend:** `tsc --noEmit` clean
+
+### FR-30 — per-stage latency (GAP-9)
+
+`StageTimings` on `backend/app/schemas/common.py`, surfaced as
+`AskResponse.timings_ms`.
+
+**Measured inside `retrieve()`, not around it.** `RetrievalResult` gained
+`embed_ms`, `search_ms` and `rerank_ms`, because only that module knows where
+the stage boundaries are — a caller timing `retrieve()` as a whole cannot
+separate embedding from search from reranking without guessing.
+
+**Nullability is the load-bearing property.** A stage that did not run reports
+`null`, never `0`: a zero is indistinguishable from a stage that ran
+instantaneously, and every percentile built from these would be quietly wrong.
+Two cases exercise it:
+
+- retrieval returns nothing → `rerank_ms` is `null` (reranking genuinely did
+  not run), while `embed_ms` and `search_ms` are real measurements
+- the retrieval gate abstains → `generate_ms` is `null`, because no model call
+  was made
+
+`lexical_ms` and `fuse_ms` are declared now and stay `null` until the hybrid
+channel lands, so the field's meaning never changes under a client that
+already reads it. A test asserts both are `null` rather than `0` today.
+
+The Space previously reported `float("nan")` for embed time as an honest
+placeholder; it now reads the real per-stage values, and renders an em-dash
+for any stage that did not run.
+
+### FR-31 — true chunk count (GAP-7)
+
+`DocumentRecord.chunk_count`, persisted at the end of ingestion as
+`len(chunks)` — the count the index actually holds.
+
+SQLite migration is **additive, nullable and idempotent**: `_migrate()` reads
+`PRAGMA table_info(documents)` and adds the column only when absent. No
+destructive DDL. A test constructs a pre-upgrade database by hand and asserts
+it opens, reports `null`, and is **not** back-filled with the old estimate —
+an estimate presented as a measurement is the exact failure this field exists
+to remove.
+
+`COALESCE` on the update means a later status write cannot wipe a recorded
+count, and a measured `0` (an empty index) is preserved as a real measurement
+rather than being confused with "unknown". Both are tested.
+
+**The `~` is gone for measured documents.** `DiskState` gained
+`particleCountMeasured`. `App.tsx` prints the bare number when the count is
+measured and keeps `~` only for the legacy estimate, in both the HUD row and
+the DOM text equivalent. An estimate never appears as a bare authoritative
+number, and a measured count never carries a `~`.
+
+### Note on the remaining `?? 0` occurrences
+
+`04_DATA_SCHEMA_API_DELTA.md` §9 asks for no `?? 0` on any nullable numeric in
+the frontend. Three remain in `App.tsx:159-163` and one in
+`static-fallback.tsx:34`. They are **shader uniforms**, not displayed values:
+WebGL requires a concrete float, and `uDiskLuminosity = 0` is the documented
+empty-state behaviour — with nothing indexed the disk does not glow
+(`MIGRATION.md`). Coercing there fabricates no telemetry; it selects a render
+state. Left as-is deliberately, recorded so the audit in Phase 6 does not
+re-flag them as defects.

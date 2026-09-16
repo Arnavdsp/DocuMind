@@ -60,6 +60,12 @@ class DocumentRecord(BaseModel):
     updated_at: datetime
     metrics: DocumentSummaryMetrics | None = None
     pages: list[PageInfo] = Field(default_factory=list)
+    chunk_count: int | None = Field(
+        default=None,
+        description="TRUE number of chunks in the vector index, counted at indexing time. "
+        "Null for documents indexed before this was recorded — rendered as an em-dash, "
+        "never back-filled with the old character-length estimate.",
+    )
     error_message: str | None = None
 
 
