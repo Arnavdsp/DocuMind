@@ -475,3 +475,118 @@ free tier is not a paid API, but an optional LLM judge running on the same
 endpoint as the generator would be judging its own family's output. If a judge
 is used at all it must be disclosed under the §4.2 constraints, and it remains
 a secondary signal — no claim rests on it alone.
+
+---
+
+## Phase 0.3 — Deterministic mock cross-encoder (FR-10, GAP-10, D6)
+
+**Status:** done
+**Tests:** 63 → **77** (14 added, zero existing tests modified)
+
+### The defect
+
+`MockModelService.get_cross_encoder` **raised** `ModelUnavailable`, and
+`CrossEncoderReranker.rerank` calls it with no `try`/`except`. So setting
+`reranker_model` while on the mock backend produced an uncaught exception and
+a 500 — not a graceful fallback.
+
+`00_CURRENT_STATE_AUDIT.md` describes the mock as one that "presumably returns
+`None` or a stub". It did neither. The practical consequence was that no
+assertion about rerank ordering could be written without a GPU and a
+multi-gigabyte download, so none were.
+
+### What was added
+
+`_MockCrossEncoder` with a `predict(pairs) -> list[float]` shape matching
+`sentence_transformers.CrossEncoder`. Scores are token overlap weighted toward
+longer tokens (standing in for the rarer, more discriminative terms a real
+cross-encoder keys on), plus a SHA-256-derived tie-break so equal-overlap
+pairs have a total order that does not depend on list position or dict
+iteration.
+
+`score_kind` is `"mock_cross_encoder"`, so a mock score can never be mistaken
+for a real one.
+
+**Deliberately bounded to [0, 1].** A real cross-encoder emits unbounded
+logits, but `Citation.relevance_score` is currently clamped to `[0, 1]`
+(D2), so emitting logits here would fabricate values through that clamp.
+Phase 2 moves the cross-encoder onto its own kind-labelled field; until then
+the mock stays inside the existing range rather than making D2 worse.
+
+### What did not change
+
+`config.reranker_model` still defaults to `None`, so `build_reranker` still
+returns `LexicalOverlapReranker` and default behaviour is untouched. A test
+asserts this.
+
+### Not fixed here, deliberately
+
+`CrossEncoderReranker` still has no `try`/`except` around `get_cross_encoder`,
+so a genuine load failure on the HF backend still raises rather than
+degrading visibly. That is FR-8's job — the fallback must be *reported*
+(`applied: false` plus a `fallback_reason`), not merely caught — and it needs
+`RerankerInfo` on the response, which is Phase 2. Catching it here without
+somewhere to report it would convert a loud failure into a silent downgrade,
+which is worse.
+
+---
+
+## Phase 0.4 — Offline source-language detection (D5)
+
+**Status:** done
+**Tests:** 77 → **85** (8 added, zero existing tests modified)
+
+### The defect
+
+`translation_service.py` called:
+
+```python
+return single_detection(text[:500], api_key=None) or "en"
+```
+
+`deep_translator.single_detection` requires a detectlanguage.com API key.
+Called with `api_key=None` it raises on **every** invocation, and the
+surrounding `except Exception: return "en"` caught it. Source-language
+detection was therefore hardcoded to English — no error, no warning — and
+`TranslateResponse.source_language` reported `"en"` as a measured fact for
+every document in every language.
+
+### The fix
+
+`detect_language_offline()` using **py3langid**, which carries its model as
+bundled package data: no network call, no API key, no runtime download, so
+NFR-8 holds. Measured cold: import plus four classifications in 0.57 s,
+correct on English, French, German and Hindi.
+
+It returns `str | None`. **None is a real answer** — returning a plausible
+default is what caused the original defect.
+
+### Schema change (additive)
+
+`TranslateResponse` gains `source_language_detected: bool = False`. The three
+cases are now distinguishable by a client:
+
+| Case | `source_language` | `source_language_detected` |
+|---|---|---|
+| Caller declared it | the declared code | `false` |
+| Detector identified it | the detected code | `true` |
+| Neither | `"auto"` | `false` |
+
+`"auto"` is the value actually passed to the provider, so it reports what
+happened rather than asserting a language nobody determined.
+`source_language` keeps its existing type (`str`, non-nullable), so R2 holds
+and existing clients are unaffected.
+
+### New finding
+
+**D9 — `TranslateResponse.truncated` is hardcoded to `False`.**
+`api/routes/translate.py` passes `truncated=False` unconditionally. The
+provider does segment long input via `_sentence_aware_chunks`, so the field
+reports a constant rather than an observation. It happens to be *accurate*
+today (segmentation is not truncation, and nothing is dropped), but it is a
+fabricated value in the NFR-5 sense: nothing measures it.
+
+Not fixed here. Reporting it truthfully requires `translate()` to return
+segment counts rather than a bare string, which is the FR-22 work in Phase
+0.6 along with `segments_total` / `segments_translated` / `content_dropped`.
+Recorded so it is not lost.

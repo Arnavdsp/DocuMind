@@ -17,3 +17,5 @@ httpx==0.28.1
 
 # Translation
 deep-translator==1.11.4
+# Offline language identification (bundled model, no runtime download)
+py3langid==0.3.0

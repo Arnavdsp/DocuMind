@@ -314,7 +314,60 @@ class MockModelService(ModelService):
         return " ".join(sentences[:4]).strip() or "No content was available to summarize."
 
     def get_cross_encoder(self, model_name: str):
-        raise ModelUnavailable("Cross-encoder reranking requires the Hugging Face backend.")
+        return _MockCrossEncoder(model_name)
+
+
+class _MockCrossEncoder:
+    """Deterministic stand-in for a cross-encoder, for tests and CPU-only dev.
+
+    Real cross-encoders score a (query, passage) pair jointly. This imitates
+    the *shape* of that — a single float per pair, higher meaning more
+    relevant — using token overlap weighted toward rarer, longer tokens, plus
+    a stable hash tie-break so equal-overlap pairs order identically on every
+    run and every machine. No GPU, no network, no download.
+
+    The scores are explicitly meaningless as a quality signal. They exist so
+    rerank *ordering*, candidate counts and response shapes are testable; the
+    existing mock-backend warning covers them exactly as it covers embeddings.
+
+    Deliberately bounded to [0, 1]. A real cross-encoder emits unbounded
+    logits, but `Citation.relevance_score` is currently clamped to [0, 1]
+    (see D2 in docs/phase_log.md), so emitting logits here would fabricate
+    values through that clamp. Phase 2 moves the cross-encoder onto its own
+    kind-labelled field; until then the mock stays inside the existing range.
+    """
+
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.score_kind = "mock_cross_encoder"
+
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+    def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        scores: list[float] = []
+        for query, passage in pairs:
+            q_tokens = self._tokens(query)
+            p_tokens = self._tokens(passage)
+            if not q_tokens or not p_tokens:
+                scores.append(0.0)
+                continue
+
+            shared = q_tokens & p_tokens
+            # Weight longer tokens higher: they stand in for the rarer,
+            # more discriminative terms a real cross-encoder keys on.
+            weight = sum(len(token) for token in shared)
+            ceiling = sum(len(token) for token in q_tokens)
+            overlap = weight / ceiling if ceiling else 0.0
+
+            # Stable, tiny tie-break so equal-overlap pairs have a total order
+            # that does not depend on dict iteration or list position.
+            digest = hashlib.sha256(f"{query}\x00{passage}".encode()).hexdigest()
+            jitter = int(digest[:8], 16) / 0xFFFFFFFF * 0.01
+
+            scores.append(round(min(overlap * 0.99 + jitter, 1.0), 6))
+        return scores
 
 
 class GroqModelService(ModelService):
