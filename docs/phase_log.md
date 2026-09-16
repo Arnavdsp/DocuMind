@@ -342,3 +342,136 @@ Network-free and GPU-free. Test count recorded at **48** across 11 modules:
 `test_api_documents` 9, `test_document_validation` 8, `test_retrieval` 5,
 `test_translation` 5, `test_api_qa` 4, `test_api_summary` 4, `test_chunking` 4,
 `test_rag` 4, `test_pdf_extraction` 3, `test_ocr` 2.
+
+---
+
+## Phase 0.2 — Groq generation backend
+
+**Status:** done
+**Tests:** 48 before → **63 after** (15 added, zero existing tests modified)
+
+### Why
+
+Generation moves from a locally-loaded `microsoft/Phi-3-mini-128k-instruct`
+to the Groq API. Groq serves chat completions only — no embeddings, no
+cross-encoders — so this is a composition, not a replacement: `generate` goes
+over the wire, `embed` and `get_cross_encoder` stay local on CPU.
+
+`HFModelService.generate` already built a `messages` list from a system and a
+user prompt, so the call shape maps onto Groq's chat completions endpoint
+without touching `rag/generation.py` or any call site.
+
+### Consequence worth recording
+
+With generation off-box, **nothing in the pipeline needs a GPU.** The
+embedding model (`all-MiniLM-L6-v2`, ~90 MB) and the cross-encoder
+(`ms-marco-MiniLM-L-6-v2`, ~90 MB) both run acceptably on CPU. The eval
+harness can therefore run on any CPU box, with no Colab session and no daily
+GPU quota — which removes the constraint that shapes most of the deployment
+plan's resource budgeting.
+
+### Free-tier facts, measured not assumed
+
+Against `https://api.groq.com/openai/v1` on 2026-09-16:
+
+| Observation | Value |
+|---|---|
+| Models available | 13 |
+| Candidates with a usable context window | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `qwen/qwen3.8-27b` — all 131k |
+| Rate limit, requests | 1000 / min |
+| Rate limit, **tokens** | **8000 / min** — the binding constraint |
+| Round trip, grounded 2-passage question | ~223 ms |
+
+**Chosen default: `openai/gpt-oss-20b`.** `groq/compound` and
+`compound-mini` were rejected despite fitting the context budget: they are
+agentic systems with built-in tool access, and a generator that can reach the
+open web cannot honour "answer using ONLY the numbered evidence passages".
+That would silently break groundedness, which is the property this project is
+built to defend.
+
+**`reasoning_effort` is set to `low`.** gpt-oss models emit internal reasoning
+tokens billed against the 8000 TPM ceiling. Measured on one grounded
+extraction question:
+
+| effort | reasoning tokens | total tokens | answer |
+|---|---|---|---|
+| low | 31 | 169 | identical |
+| medium | 54 | 191 | identical |
+| high | 91 | 228 | identical |
+
+Same answer, 26% fewer tokens at `low`. On a token-per-minute budget that is
+throughput, so `low` is the default and the setting is exposed rather than
+hardcoded.
+
+### Design decisions
+
+**`auto` never selects `groq`.** Routing generation off-box is an explicit
+choice; a key appearing in the environment must not silently change which
+backend answers, because `model_used` and every eval number are attributed to
+it.
+
+**`backend_name` reports both halves.** When the local delegate is the mock,
+it returns `groq:<model> (embeddings: mock)` rather than plain `groq:<model>`.
+Generation being real while retrieval scores are meaningless is exactly the
+half-working state the existing mock-backend warning exists for, and the UI
+renders this string directly.
+
+**A missing key raises; it does not fall back.** Degrading to another backend
+on a missing credential would make `model_used` a lie.
+
+**`extractive_qa` raises on this backend.** Per D7 it has no call site
+anywhere in the application, so standing up a span-extraction model to satisfy
+the ABC would download ~500 MB that nothing consumes. It raises rather than
+returning a fabricated span with a fabricated score.
+
+**Retry policy distinguishes retryable from not.** 429 and 5xx back off and
+retry (honouring `Retry-After` when present); other 4xx raise immediately,
+because a bad key or a bad model name will not resolve on retry and retrying
+burns the rate-limit budget.
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `backend/app/config.py` | `model_backend` gains `"groq"`; new `groq_base_url`, `groq_model`, `groq_reasoning_effort`, `groq_timeout_seconds`, `groq_max_retries`; `groq_api_key` added to the existing Secrets section |
+| `backend/app/services/model_service.py` | new `GroqModelService`, `_sleep_backoff`; `get_model_service` routes `"groq"` |
+| `backend/requirements.txt` | `httpx==0.28.1` |
+| `.env.example` | Groq section; credential documented by **name only**, with the four places it is supplied |
+| `backend/tests/test_groq_backend.py` | new, 15 tests, network-free |
+
+### Verification
+
+```
+$ MODEL_BACKEND=mock pytest backend/tests -q
+63 passed
+
+$ grep -rln "import torch\|from transformers" backend/app/
+backend/app/services/model_service.py
+```
+
+Torch containment (R6) holds — the new backend imports neither, because the
+local delegate owns that.
+
+Live check through `GroqModelService` with the project's real
+`_SYSTEM_PROMPT`, two evidence passages:
+
+- grounded question → `Recall@4 for the hybrid configuration was 71.2 percent [1].`
+- unanswerable question → `I don't have enough information in this document to answer that.`
+
+Abstention behaviour survives the backend change.
+
+### Credential handling
+
+No key is committed. `groq_api_key` is read from the environment by the
+existing pydantic-settings mechanism, exactly as `ngrok_authtoken` already
+was. `.gitignore` already covers `.env`, `.env.local` and `backend/.env`.
+A test asserts the key does not appear in the text of a raised
+`ModelUnavailable`, since those messages reach logs and error handlers.
+
+### Deviation
+
+`03_EVAL_BENCHMARK_PLAN.md` §4.2 forbids "LLM-as-judge on a paid API". Groq's
+free tier is not a paid API, but an optional LLM judge running on the same
+endpoint as the generator would be judging its own family's output. If a judge
+is used at all it must be disclosed under the §4.2 constraints, and it remains
+a secondary signal — no claim rests on it alone.

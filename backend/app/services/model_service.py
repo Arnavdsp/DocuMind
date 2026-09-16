@@ -317,6 +317,140 @@ class MockModelService(ModelService):
         raise ModelUnavailable("Cross-encoder reranking requires the Hugging Face backend.")
 
 
+class GroqModelService(ModelService):
+    """Generation via the Groq API; embedding and reranking stay local.
+
+    Groq serves chat completions only — no embeddings, no cross-encoders — so
+    this is a composition rather than a replacement: `generate` goes over the
+    wire, everything else is delegated to a local `ModelService`. The delegate
+    is held explicitly so `backend_name` can report *both* halves truthfully.
+    A deployment generating with Groq but embedding with the mock is not a
+    Groq deployment, and the response says so rather than implying parity.
+
+    No `torch`/`transformers` import appears here: the delegate owns that, so
+    the containment invariant survives this backend existing.
+    """
+
+    def __init__(self, settings: Settings, local: ModelService):
+        self._settings = settings
+        self._local = local
+
+    # -- capabilities delegated to local models --------------------------------
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return self._local.embed(texts)
+
+    def get_cross_encoder(self, model_name: str):
+        return self._local.get_cross_encoder(model_name)
+
+    def extractive_qa(self, question: str, context: str) -> tuple[str, float, float]:
+        # Not implemented deliberately. No call site in the application reaches
+        # this method, and standing up a span-extraction model purely to
+        # satisfy the ABC would download ~500 MB that nothing consumes. If a
+        # caller ever appears, this raises rather than returning a fabricated
+        # span with a fabricated score.
+        raise ModelUnavailable(
+            internal_detail="extractive_qa is not served by the Groq backend; "
+            "use MODEL_BACKEND=hf if a span-extraction model is required."
+        )
+
+    # -- identity ---------------------------------------------------------------
+    @property
+    def backend_name(self) -> str:
+        local = self._local.backend_name
+        if local == "mock":
+            # Surfaced verbatim on AskResponse.model_used. Retrieval scores are
+            # meaningless under mock embeddings, so this must never read as a
+            # plain "groq" deployment.
+            return f"groq:{self._settings.groq_model} (embeddings: mock)"
+        return f"groq:{self._settings.groq_model}"
+
+    @property
+    def device_info(self) -> dict[str, str]:
+        info = dict(self._local.device_info)
+        info["generation"] = f"groq api ({self._settings.groq_model})"
+        return info
+
+    # -- generation -------------------------------------------------------------
+    def generate(
+        self, system_prompt: str, user_prompt: str, *, max_new_tokens: int, temperature: float
+    ) -> str:
+        import httpx
+
+        key = self._settings.groq_api_key
+        if not key:
+            # Loud, not a fallback. Silently degrading to another backend would
+            # make model_used a lie and the eval numbers unattributable.
+            raise ModelUnavailable(
+                internal_detail="GROQ_API_KEY is not set. Export it in the environment "
+                "(or set it as a Space secret); it is never read from a file in this repo."
+            )
+
+        payload: dict = {
+            "model": self._settings.groq_model,
+            "temperature": temperature,
+            "max_completion_tokens": max_new_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if self._settings.groq_reasoning_effort:
+            payload["reasoning_effort"] = self._settings.groq_reasoning_effort
+
+        url = f"{self._settings.groq_base_url.rstrip('/')}/chat/completions"
+        last_detail = "no attempt was made"
+
+        for attempt in range(self._settings.groq_max_retries):
+            try:
+                response = httpx.post(
+                    url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=self._settings.groq_timeout_seconds,
+                )
+            except httpx.HTTPError as exc:
+                last_detail = f"transport error: {exc}"
+                _sleep_backoff(attempt)
+                continue
+
+            # 429 is the free tier's tokens-per-minute ceiling, not an outage.
+            # Retry-After is authoritative when present; back off otherwise.
+            if response.status_code == 429 or response.status_code >= 500:
+                last_detail = f"http {response.status_code}: {response.text[:200]}"
+                _sleep_backoff(attempt, retry_after=response.headers.get("retry-after"))
+                continue
+
+            if response.status_code != 200:
+                # 4xx other than 429 will not change on retry (bad key, bad model).
+                raise ModelUnavailable(
+                    internal_detail=f"groq http {response.status_code}: {response.text[:200]}"
+                )
+
+            body = response.json()
+            try:
+                return body["choices"][0]["message"]["content"].strip()
+            except (KeyError, IndexError, AttributeError) as exc:
+                raise ModelUnavailable(
+                    internal_detail=f"unexpected groq response shape: {exc}"
+                ) from exc
+
+        raise ModelUnavailable(
+            internal_detail=f"groq unavailable after {self._settings.groq_max_retries} attempts: {last_detail}"
+        )
+
+
+def _sleep_backoff(attempt: int, *, retry_after: str | None = None) -> None:
+    import time
+
+    if retry_after:
+        try:
+            time.sleep(min(float(retry_after), 60.0))
+            return
+        except ValueError:
+            pass
+    time.sleep(min(0.5 * (2**attempt), 16.0))
+
+
 def _hf_backend_importable() -> bool:
     try:
         import sentence_transformers  # noqa: F401
@@ -336,6 +470,19 @@ def get_model_service() -> ModelService:
         backend = "hf" if _hf_backend_importable() else "mock"
 
     log_event(logger, "model_service_selected", backend=backend)
+    if backend == "groq":
+        # Embedding and reranking still need local models. Fall back to mock
+        # only when the HF stack is genuinely absent, and let backend_name
+        # carry that fact to the client rather than hiding it here.
+        local: ModelService = HFModelService(settings) if _hf_backend_importable() else MockModelService()
+        if isinstance(local, MockModelService):
+            log_event(
+                logger,
+                "groq_local_delegate_is_mock",
+                level=30,
+                detail="generation is real; embeddings and rerank scores are not",
+            )
+        return GroqModelService(settings, local)
     if backend == "hf":
         return HFModelService(settings)
     return MockModelService()
