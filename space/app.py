@@ -40,6 +40,11 @@ os.environ.setdefault("MODEL_DEVICE", "cpu")
 # against the live Space, not assumed.
 os.environ.setdefault("TRANSLATION_PROVIDER", "groq")
 
+# SSR is deliberately left at the platform default. Disabling it was tried and
+# the Space then failed to start at all — it never reached "Running on local
+# URL" — so the Node SSR proxy is load-bearing on this tier. Document identity
+# does not depend on it either way: it lives in a visible textbox rather than
+# a per-session gr.State, precisely so no rendering mode can strand it.
 import gradio as gr  # noqa: E402
 import pipeline  # noqa: E402
 
@@ -62,12 +67,52 @@ except ImportError:  # running locally
 DEMO_DIR = Path(__file__).parent / "corpus"
 EM_DASH = "—"
 
-# Gradio 6 renders server-side by default. SSR re-executes the module per
-# request, which makes hidden gr.State the least reliable place to keep
-# document identity — so identity lives in a visible textbox instead (see
-# below) and SSR is switched off, because this app is a stateful session
-# rather than a static page.
-os.environ.setdefault("GRADIO_SSR_MODE", "false")
+
+def _theme() -> gr.themes.Base:
+    """A theme whose tokens are dark in light mode too.
+
+    The CSS below forces a dark page background. Gradio, however, renders in
+    light mode unless the visitor asks otherwise, so its own components kept
+    their light-mode text colours — dark text on a dark page, invisible unless
+    you selected it. Styling the background without also owning the text
+    colour is what caused that, so the tokens are set here rather than fought
+    in CSS, and the *_dark variants are set to the same values so the page
+    looks identical whichever mode the browser prefers.
+    """
+    slate = gr.themes.Base(primary_hue="blue", neutral_hue="slate")
+    return slate.set(
+        body_background_fill="#070b12",
+        body_background_fill_dark="#070b12",
+        body_text_color="#c8e4f0",
+        body_text_color_dark="#c8e4f0",
+        body_text_color_subdued="#7fa6bb",
+        body_text_color_subdued_dark="#7fa6bb",
+        block_background_fill="#0c1420",
+        block_background_fill_dark="#0c1420",
+        block_border_color="#1d3446",
+        block_border_color_dark="#1d3446",
+        block_label_text_color="#9ed6ec",
+        block_label_text_color_dark="#9ed6ec",
+        block_title_text_color="#9ed6ec",
+        block_title_text_color_dark="#9ed6ec",
+        block_info_text_color="#7fa6bb",
+        block_info_text_color_dark="#7fa6bb",
+        input_background_fill="#0f1a28",
+        input_background_fill_dark="#0f1a28",
+        input_border_color="#1d3446",
+        input_border_color_dark="#1d3446",
+        border_color_primary="#1d3446",
+        border_color_primary_dark="#1d3446",
+        panel_background_fill="#0c1420",
+        panel_background_fill_dark="#0c1420",
+        table_text_color="#c8e4f0",
+        table_text_color_dark="#c8e4f0",
+        table_even_background_fill="#0c1420",
+        table_even_background_fill_dark="#0c1420",
+        table_odd_background_fill="#0f1a28",
+        table_odd_background_fill_dark="#0f1a28",
+    )
+
 
 CSS = """
 :root {
@@ -107,6 +152,23 @@ CSS = """
 .dm-abstain {
   border-left: 2px solid var(--dm-quiet); padding: 12px 15px;
   background: rgba(58, 98, 113, 0.12); color: #b9d4e0;
+}
+/* Markdown and table bodies render their own text; the theme tokens above do
+   not always reach inside them, and unreadable output is worse than ugly
+   output. */
+.gradio-container .prose, .gradio-container .prose * { color: #c8e4f0 !important; }
+.gradio-container .prose h1, .gradio-container .prose h2,
+.gradio-container .prose h3 { color: #eafaff !important; }
+.gradio-container table td, .gradio-container table th { color: #c8e4f0 !important; }
+.gradio-container textarea, .gradio-container input[type="text"] {
+  color: #eafaff !important; background: #0f1a28 !important;
+}
+.gradio-container label, .gradio-container .svelte-1gfkn6j { color: #9ed6ec !important; }
+/* Inline code keeps a light chip background from the base theme, which
+   renders as dark-on-light inside an otherwise dark card. */
+.gradio-container code, .gradio-container pre {
+  background: #0f1a28 !important; color: #6ee7d7 !important;
+  border: 1px solid #1d3446 !important;
 }
 """
 
@@ -162,6 +224,10 @@ def _nodes_svg(citations, total_chunks: int, page_count: int) -> str:
         f'<svg viewBox="0 0 {width} {height + 44}" width="100%" style="display:block">'
         f'{"".join(dots)}{legend_label}{"".join(legend)}</svg></div>'
     )
+
+
+def _warn(message: str) -> str:
+    return f'<div class="dm-card dm-warn">{message}</div>'
 
 
 def _ms(value: float | None) -> str:
@@ -235,11 +301,16 @@ def do_ingest(file_obj):
     the user that a document really is loaded.
     """
     if file_obj is None:
-        return "", "Choose a document first.", "", ""
+        return "", _warn("Choose a document first."), "", ""
     try:
         result = pipeline.ingest(file_obj.name)
     except Exception as exc:
-        return "", f"Could not read that document: {exc}", "", ""
+        # Rendered as a styled card, not plain Markdown. When this was plain
+        # text it inherited Gradio's light-mode colour on a dark page and was
+        # invisible — an ingestion failure looked like nothing happening at
+        # all, and every later tab then said "read a document first" with no
+        # explanation anywhere on screen.
+        return "", _warn(f"Could not read that document — {exc}"), "", ""
 
     summary = (
         f'<div class="dm-card"><div class="dm-note">READ INTO MEMORY</div><div class="dm-kv">'
@@ -422,7 +493,7 @@ with gr.Blocks(title="DocuMind") as demo:
         info="Filled in when a document is read. Every tab below works off this value.",
         interactive=False,
     )
-    ingest_error = gr.Markdown()
+    ingest_error = gr.HTML()
     ingest_summary = gr.HTML()
     ingest_nodes = gr.HTML()
 
@@ -513,7 +584,7 @@ if __name__ == "__main__":
     # entire DocuMind palette on the deployed Space.
     demo.launch(
         css=CSS,
-        theme=gr.themes.Base(),
+        theme=_theme(),
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),
     )

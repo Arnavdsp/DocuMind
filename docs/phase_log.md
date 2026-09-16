@@ -1041,3 +1041,85 @@ all new fields; `tsc --noEmit` clean.
 `tools/build_notebook.py` (verbatim upstream) carry import-order findings that
 predate this work. The repository was never fully lint-clean; reformatting
 files this round did not touch would be noise in the diff.
+
+---
+
+## Phase 0.10 — Three defects reported from a user session
+
+Arnav recorded a screencast. Frame analysis (ffmpeg) plus Space logs identified
+three separate causes, only one of which was cosmetic.
+
+### BUG-4 — Invisible text (the reported symptom)
+
+The page rendered dark, Gradio's own components did not. Gradio renders in
+**light mode** unless the visitor's browser asks otherwise, and the app's CSS
+forced a dark `.gradio-container` background while leaving Gradio's text
+colours at their light-mode values — dark text on a dark page, readable only
+when selected. Tab labels, descriptions, the footer and, critically, **error
+messages** were all affected.
+
+Styling a background without also owning the text colour is the whole defect.
+**Fixed** by setting theme tokens (`body_text_color`, `block_*`, `input_*`,
+`table_*`) with their `*_dark` variants set to the same values, so the page
+looks identical whichever mode the browser prefers, plus targeted CSS for
+Markdown bodies, table cells and inline code, which the tokens do not always
+reach.
+
+Verified in Chromium with `color_scheme="light"` — the mode that produced the
+bug: body `rgb(7,11,18)`, text `rgb(200,228,240)`, answer text measured at
+`rgb(200,228,240)` on the dark card.
+
+### BUG-5 — The real blocker: OCR unavailable, failing silently
+
+The screencast shows `AA-312.pdf` loaded and **"Document handle" empty**. No
+handle means every tab correctly reports "read a document first", which is why
+ask, summarize and translate all appeared to produce nothing.
+
+Space logs show `ocr_failed`. `extractors.extract_pdf` falls back to OCR for
+pages with no text layer; `pytesseract` is only a Python wrapper around the
+`tesseract` binary, and **the Space had no `packages.txt`**, so the binary was
+never installed. Extraction returned empty text and the document was rejected.
+
+The failure was invisible because the error rendered through BUG-4. Ingestion
+errors now render as a styled `dm-warn` card rather than plain Markdown, so a
+rejected document can never again look like nothing happening.
+
+**The OCR fix itself is not landed.** Two attempts, both recorded rather than
+buried:
+
+1. `packages.txt` with explanatory comments **failed the build**. The Space
+   builder runs `xargs -r -a /tmp/packages.txt apt-get install -y`, so every
+   whitespace-separated token is treated as a package name and each comment
+   word became `E: Unable to locate package ...`. It takes bare package names
+   only.
+2. With comments removed the build passed, but the Space then died during
+   startup with **no Python traceback at all** — two log lines and silence,
+   which is a killed process rather than an exception. Adding `packages.txt`
+   forces a full image rebuild, and this repository's Space requirements use
+   ranges with `torch` unpinned, so a rebuild can resolve heavier versions
+   than the previously cached image.
+
+`packages.txt` was removed and deleted from the Space repo to restore service.
+**Scanned PDFs therefore still cannot be read on the Space.** Text-layer PDFs,
+`.txt`, PNG and JPG all work. Reintroducing OCR needs the image's heavy
+dependencies pinned first so the rebuild is reproducible rather than a
+resolver roll of the dice.
+
+### Not a bug — "DEVICE cpu"
+
+Arnav asked whether CPU indicates a problem or a Groq rate limit. Neither.
+Generation is an HTTP call to Groq, and both local models are ~90 MB and
+acceptable on CPU. It is also *required*: ZeroGPU rejects CUDA init outside a
+`@spaces.GPU` function (see Phase 0.8), and staying on CPU means no visitor
+GPU quota is consumed. A Groq rate limit surfaces as an HTTP 429 with a retry,
+not a device change.
+
+### Also fixed
+
+`GRADIO_SSR_MODE` was being set **after** `import gradio`, so it never took
+effect. Moving it before the import revealed that disabling SSR stops the
+Space from starting at all — it never reaches "Running on local URL" — so the
+Node SSR proxy is load-bearing on this tier. SSR is now left at the platform
+default, and the reasoning is recorded in the file so it is not retried
+blindly. Document identity does not depend on it either way, since it lives in
+a visible textbox rather than a per-session `gr.State`.
