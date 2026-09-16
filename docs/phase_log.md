@@ -838,3 +838,100 @@ absent on the Space itself.
 - Summarize and translate still have no tabs, so R4 (all three pipelines at a
   phase boundary) is **not** met.
 - The Evidence tab remains all em-dashes until the harness runs.
+
+---
+
+## Phase 0.8 — All three pipelines live (R4)
+
+**Status:** done. Ask, Summarize and Translate all verified against the live Space.
+**Tests:** 114 → **118**
+
+### The bug that broke Q&A on the Space
+
+```
+Low-level CUDA init (`torch._C._cuda_init`) reached. ZeroGPU's PyTorch CUDA
+emulation mode did not intercept a CUDA operation in your code.
+```
+
+`HFModelService._detect_device()` chose its device with
+`torch.cuda.is_available()`. On ZeroGPU that returns **True** under CUDA
+emulation, so sentence-transformers loaded onto `cuda`, triggering a real CUDA
+init outside any `@spaces.GPU` function — which ZeroGPU rejects outright.
+Ingestion failed, so every subsequent tab reported "Read a document first".
+
+The design intent was always CPU-only (both models are ~90 MB, generation is
+an HTTP call). The flaw was that the intent was never *expressed* — it was
+inferred from a probe that answers misleadingly on this platform.
+
+**Fix:** `model_device: Literal["auto","cpu","cuda"] = "auto"`. When set, it
+is honoured without importing torch at all. A test enforces that by making
+`import torch` raise if reached; a second test asserts `"auto"` still probes,
+so the fix is not indistinguishable from hardcoding CPU.
+
+### Two other Gradio 6 breakages
+
+- `css` and `theme` on the `Blocks` constructor are accepted with a warning
+  and then **ignored** — the entire DocuMind palette was silently dropped on
+  the deployed Space. Both moved to `launch()`.
+- `show_copy_button` was removed from `Textbox`; it raised at import.
+
+Both were found by reading the Space's logs. The second only surfaced because
+the app was deployed without being booted locally first — the rewritten UI is
+now launched and browser-driven before every deploy.
+
+### `gr.State` replaced with an explicit document handle
+
+Document identity lived in a hidden `gr.State`, which is per-browser-session.
+That made the Space's HTTP API unusable — every call got fresh state and
+answered "Load a document first" — and is fragile under SSR. Identity now
+lives in a visible, read-only textbox that every tab reads. The browser path
+is unchanged; the API path now works, which is how these pipelines were
+verified. `GRADIO_SSR_MODE=false` is set, since this is a stateful session
+rather than a static page.
+
+### Translation moved to Groq
+
+`GoogleTranslateProvider` rate-limits by **source IP**. HF Spaces share egress
+IPs, so it returned "too many requests" on a single-segment 82-word document —
+reproduced from both this sandbox and the live Space, so it is structural, not
+transient.
+
+`05_ZERO_BUDGET_DEPLOYMENT_PLAN.md` §1.4 proposed a local model instead
+(m2m100_418M ~1.9 GB, or opus-mt pairs ~300 MB each). `GroqTranslationProvider`
+costs no extra disk, no extra download, stays at $0, and sidesteps the
+CC-BY-NC licence trap that rules out NLLB for an MIT repo.
+
+**Trade-off stated rather than hidden:** an instruction-tuned general model is
+not a dedicated NMT model. Translation quality should be measured by the
+harness (`03` §7.2: target-language ID rate, passthrough rate, length ratio,
+segment coverage, chrF) before any claim is made about it.
+
+`google` remains selectable and is still the default in `config.py`; only the
+Space overrides it to `groq`.
+
+### D9 closed
+
+`TranslateResponse.truncated` was passed `False` unconditionally. It now
+reports `segments_total > 1`, alongside new `segments_total`,
+`segments_translated` and `content_dropped` fields, all measured by
+`translate_document()`. That function was added **beside**
+`TranslationProvider.translate` rather than changing its signature, because
+existing tests pin that method's string return and existing tests are not
+edited to make new code fit.
+
+### Verified live
+
+| Pipeline | Result |
+|---|---|
+| **Ask** (grounded) | "The recall@4 for the hybrid configuration was 71.2 percent【1】" · grounding `strong` · top signal `0.5964` · embed 10 ms |
+| **Ask** (unanswerable) | **abstained** · "NO PATHWAY ACTIVATED" · top signal `0.1197`, below the 0.18 floor |
+| **Summarize** | strategy `direct`, 415 ms, structured executive summary + key findings + extracted numbers |
+| **Translate** → hi | `segments 1/1`, source `en (detected)`, 354 ms, numbers preserved |
+| **Translate** → fr | `segments 1/1`, 390 ms, `71,2 %` — correct locale formatting |
+
+`model_used` reads `groq:openai/gpt-oss-20b` with **no** "(embeddings: mock)"
+suffix, so the Space is running real MiniLM embeddings. Abstention only began
+working correctly once those were real — under mock embeddings the scores
+carry no meaning, exactly as the banner says.
+
+**R4 is now met**: all three pipelines work on the deployed backend.

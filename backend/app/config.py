@@ -54,13 +54,21 @@ class Settings(BaseSettings):
     generation_model: str = Field(default="microsoft/Phi-3-mini-128k-instruct")
     qa_model: str = Field(default="deepset/roberta-base-squad2")
     reranker_model: str | None = Field(default=None)  # optional cross-encoder
-    translation_provider: Literal["google", "none"] = "google"
+    # "groq" reuses the generation model. "google" uses deep_translator's
+    # unofficial endpoint, which rate-limits by source IP and is therefore
+    # unreliable on shared hosts like HF Spaces.
+    translation_provider: Literal["google", "groq", "none"] = "google"
 
     # --- Model runtime behavior ---
     # "groq" routes generation to the Groq API and keeps embedding and
     # cross-encoder work local; "auto" never selects it, so a missing key can
     # never silently change which backend answers.
     model_backend: Literal["auto", "hf", "mock", "groq"] = "auto"
+    # "auto" picks cuda when torch reports it available. Forcing "cpu" matters
+    # on ZeroGPU: torch.cuda.is_available() returns True there under CUDA
+    # emulation, but any real CUDA init outside a @spaces.GPU function is
+    # rejected outright. A Space doing its embedding on CPU must say so.
+    model_device: Literal["auto", "cpu", "cuda"] = "auto"
     generation_max_new_tokens: int = 500
     generation_temperature: float = 0.0
 

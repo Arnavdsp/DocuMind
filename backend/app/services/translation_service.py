@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from app.logging import get_logger, log_event
 from app.utils.errors import TranslationFailed
@@ -127,7 +128,114 @@ class NullTranslationProvider(TranslationProvider):
         raise TranslationFailed("Translation is disabled on this deployment.")
 
 
-def get_translation_provider(provider_name: str) -> TranslationProvider:
+class GroqTranslationProvider(TranslationProvider):
+    """Translate with the generation model already configured for this app.
+
+    Why this exists: `GoogleTranslateProvider` uses deep_translator's
+    unofficial endpoint, which rate-limits by source IP. Hugging Face Spaces
+    share egress IPs, so it returns "too many requests" there regardless of
+    how little this app sends — measured, not assumed.
+
+    The deployment plan's alternative was a local model (m2m100_418M at
+    ~1.9 GB, or opus-mt pairs at ~300 MB each). This costs no extra disk, no
+    extra download, stays at $0, and avoids the CC-BY-NC licence trap that
+    rules out NLLB for an MIT repo. The trade-off, stated plainly: an
+    instruction-tuned general model is not a dedicated NMT model, and its
+    output should not be presented as one.
+    """
+
+    name = "groq"
+
+    _SYSTEM = (
+        "You are a translation engine. Translate the user's text into {target}. "
+        "Output ONLY the translation — no preamble, no notes, no quotes, no "
+        "explanation. Preserve numbers, names, units and formatting exactly. "
+        "If a passage is already in the target language, return it unchanged."
+    )
+
+    def __init__(self, model_service):
+        self._model_service = model_service
+
+    def detect_language(self, text: str) -> str | None:
+        return detect_language_offline(text)
+
+    def translate(self, text: str, *, source: str, target: str) -> str:
+        if not text.strip():
+            return ""
+        try:
+            return self._model_service.generate(
+                self._SYSTEM.format(target=target),
+                text,
+                # Generous headroom: translations run longer than their source
+                # in many target languages, and a clipped translation would be
+                # exactly the silent truncation this pipeline exists to avoid.
+                max_new_tokens=max(1024, len(text.split()) * 4),
+                temperature=0.0,
+            ).strip()
+        except Exception as exc:
+            raise TranslationFailed(internal_detail=str(exc)) from exc
+
+
+def get_translation_provider(provider_name: str, model_service=None) -> TranslationProvider:
+    if provider_name == "groq":
+        if model_service is None:
+            raise TranslationFailed(
+                internal_detail="the groq translation provider needs a model service"
+            )
+        return GroqTranslationProvider(model_service)
     if provider_name == "google":
         return GoogleTranslateProvider()
     return NullTranslationProvider()
+
+
+@dataclass(frozen=True)
+class TranslationResult:
+    """What translation actually did, not what it was asked to do.
+
+    `TranslateResponse.truncated` used to be passed `False` unconditionally by
+    the route — accurate, but unmeasured, which is the same class of defect as
+    a fabricated number. These counts make it an observation.
+    """
+
+    text: str
+    segments_total: int
+    segments_translated: int
+
+    @property
+    def content_dropped(self) -> bool:
+        return self.segments_translated != self.segments_total
+
+
+def translate_document(
+    provider: TranslationProvider, text: str, *, source: str, target: str
+) -> TranslationResult:
+    """Segment on sentence boundaries, translate each, and count both ends.
+
+    Added alongside `TranslationProvider.translate` rather than changing its
+    signature: that method's string return is pinned by existing tests, and
+    the rule here is that existing tests are not edited to make new code fit.
+
+    Each segment is passed to the provider individually. The provider chunks
+    internally too, but a segment already inside the limit yields exactly one
+    chunk, so the counts stay meaningful.
+    """
+    segments = _sentence_aware_chunks(text, _SAFE_CHUNK_CHARS)
+    if not segments:
+        return TranslationResult(text="", segments_total=0, segments_translated=0)
+
+    translated: list[str] = []
+    for index, segment in enumerate(segments):
+        # The Google endpoint documents ~5 requests/second. Pace between
+        # segments rather than relying on the retry path to absorb a limit we
+        # can simply not exceed.
+        if index:
+            time.sleep(0.25)
+        piece = provider.translate(segment, source=source, target=target)
+        if piece and piece.strip():
+            translated.append(piece)
+
+    return TranslationResult(
+        text=" ".join(translated),
+        segments_total=len(segments),
+        segments_translated=len(translated),
+    )

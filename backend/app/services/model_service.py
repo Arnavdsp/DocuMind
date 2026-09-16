@@ -90,6 +90,16 @@ class HFModelService(ModelService):
     def _detect_device(self) -> str:
         if self._device:
             return self._device
+
+        configured = getattr(self._settings, "model_device", "auto")
+        if configured != "auto":
+            # Honoured without consulting torch at all. On ZeroGPU,
+            # torch.cuda.is_available() answers True under CUDA emulation, so
+            # merely asking is not enough — the caller has to be able to say
+            # "CPU" and have that be final.
+            self._device = configured
+            return self._device
+
         import torch
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"

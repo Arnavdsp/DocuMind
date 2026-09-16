@@ -28,6 +28,7 @@ from app.rag.vector_store import NumpyVectorStore
 from app.schemas.qa import GroundingLevel
 from app.services.model_service import get_model_service
 from app.services.summarization_service import summarize_document
+from app.services.translation_service import get_translation_provider, translate_document
 
 _settings = get_settings()
 _vector_store = NumpyVectorStore(_settings.index_dir)
@@ -183,10 +184,49 @@ def candidate_rows(document_id: str, question: str) -> tuple[list[list], float]:
 
 
 def summarize(document_id: str):
+    """Structured summary plus the strategy that produced it.
+
+    Returns (StructuredSummary, strategy, elapsed_ms). `strategy` is "direct"
+    for short documents and "map_reduce" for long ones — reported rather than
+    inferred, so the caller can see which path ran.
+    """
     pages = _pages_by_document.get(document_id)
-    if not pages:
-        raise ValueError("That document is not loaded in this session.")
-    return summarize_document(pages, model_service=get_model_service(), settings=_settings)
+    if pages is None:
+        raise ValueError("That document is not loaded. Read it into memory first.")
+    started = time.perf_counter()
+    summary, strategy = summarize_document(
+        pages, model_service=get_model_service(), settings=_settings
+    )
+    return summary, strategy, (time.perf_counter() - started) * 1000
+
+
+def translate(document_id: str, target_language: str, source_language: str | None = None):
+    """Translate the whole document, reporting real segment counts.
+
+    Segmentation and counting live in `app.services.translation_service`; this
+    only passes values through, so the Space and the API report identically.
+    """
+    pages = _pages_by_document.get(document_id)
+    if pages is None:
+        raise ValueError("That document is not loaded. Read it into memory first.")
+
+    full_text = "\n\n".join(p.text for p in pages if p.text)
+    provider = get_translation_provider(_settings.translation_provider, get_model_service())
+
+    # Three distinct cases kept distinct, exactly as the API route does it:
+    # declared by the caller, detected, or genuinely unknown ("auto").
+    declared = source_language or None
+    detected = provider.detect_language(full_text) if not declared else None
+    source = declared or detected or "auto"
+
+    started = time.perf_counter()
+    result = translate_document(provider, full_text, source=source, target=target_language)
+    elapsed = (time.perf_counter() - started) * 1000
+    return result, source, detected is not None, provider.name, elapsed
+
+
+def translation_enabled() -> bool:
+    return _settings.translation_provider != "none"
 
 
 def title_for(document_id: str) -> str:

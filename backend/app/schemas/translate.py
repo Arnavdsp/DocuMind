@@ -30,3 +30,15 @@ class TranslateResponse(BaseModel):
         default=False,
         description="True when the document exceeded the provider's safe length and was chunked.",
     )
+    segments_total: int | None = Field(
+        default=None, description="Sentence-boundary segments the input was split into."
+    )
+    segments_translated: int | None = Field(
+        default=None,
+        description="Segments that came back with content. Equal to segments_total on a "
+        "clean run; a shortfall means content was dropped and content_dropped is true.",
+    )
+    content_dropped: bool = Field(
+        default=False,
+        description="True when segments_translated < segments_total. Measured, not assumed.",
+    )

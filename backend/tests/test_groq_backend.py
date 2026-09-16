@@ -186,3 +186,62 @@ def test_api_key_is_not_present_in_the_raised_message(monkeypatch, no_sleep):
         service.generate("sys", "user", max_new_tokens=100, temperature=0.0)
     assert secret not in str(excinfo.value)
     assert secret not in repr(excinfo.value)
+
+
+# --- device selection ---------------------------------------------------------
+
+
+def test_configured_device_is_honoured_without_consulting_torch(monkeypatch):
+    """On ZeroGPU torch.cuda.is_available() returns True under CUDA emulation,
+    but a real CUDA init outside @spaces.GPU is rejected. An explicit "cpu"
+    must therefore win without torch being asked at all.
+
+    Enforced by making the import itself fail: if _detect_device reaches
+    `import torch` when a device is configured, this raises.
+    """
+    import builtins
+
+    from app.services.model_service import HFModelService
+
+    real_import = builtins.__import__
+
+    def refuse_torch(name, *args, **kwargs):
+        if name == "torch":
+            raise AssertionError("torch must not be consulted when a device is configured")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_torch)
+    assert HFModelService(_settings(model_device="cpu"))._detect_device() == "cpu"
+
+
+def test_auto_device_does_consult_torch(monkeypatch):
+    """The counterpart: "auto" must still probe, or the fix above would be
+    indistinguishable from hardcoding CPU everywhere."""
+    import builtins
+
+    from app.services.model_service import HFModelService
+
+    real_import = builtins.__import__
+    consulted = []
+
+    def note_torch(name, *args, **kwargs):
+        if name == "torch":
+            consulted.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", note_torch)
+    try:
+        HFModelService(_settings(model_device="auto"))._detect_device()
+    except Exception:
+        pass  # torch may be absent here; the point is that it was reached
+    assert consulted, "auto should probe torch"
+
+
+def test_device_defaults_to_auto():
+    assert Settings().model_device == "auto"
+
+
+def test_configured_cuda_is_also_honoured():
+    from app.services.model_service import HFModelService
+
+    assert HFModelService(_settings(model_device="cuda"))._detect_device() == "cuda"
