@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # It must contain ONLY bare package names, one per line. The builder runs
 # `xargs -r -a /tmp/packages.txt apt-get install -y`, so a comment line is
 # passed to apt as a list of package names and fails the whole build.
-SPACE_FILES = ["app.py", "pipeline.py", "requirements.txt", "README.md"]
+SPACE_FILES = ["app.py", "pipeline.py", "requirements.txt", "packages.txt", "README.md"]
 
 EXCLUDE_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".git"}
 

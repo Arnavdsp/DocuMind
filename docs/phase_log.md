@@ -1247,3 +1247,71 @@ now the strongest argument for doing the eval harness next.
 `tesseract` remains uninstalled, so a **scanned** PDF (no text layer) would
 still be rejected. `AA-312.pdf` was not such a document, so BUG-5's user-facing
 impact is smaller than assumed — but the gap is real and unfixed.
+
+---
+
+## Phase 0.13 — OCR landed (BUG-5 closed)
+
+**Status:** done, verified live
+
+### The question asked
+
+Arnav asked whether the inability to read a screenshot was a limitation of
+using Tesseract as the extractor. It was not. Tesseract was **not installed**
+on the Space at all — `pytesseract` is only a Python wrapper, and the binary
+requires `packages.txt`. Not a weak extractor; an absent one.
+
+This is also why `AA-312.pdf` worked perfectly while a PNG did not: that PDF
+carries a text layer, so `pdfplumber` reads it directly and OCR is never
+invoked. An image has no path except OCR.
+
+### Correction to an earlier claim
+
+Phase 0.10 and 0.11 both stated that "PNG and JPG work" on the Space. They did
+not. Image OCR had been verified **locally**, in a container where `tesseract`
+was apt-installed by hand early in the session, and never on the Space itself.
+The claim was carried forward twice without being re-checked against the
+deployment it described.
+
+### Why the retry worked when two earlier attempts had not
+
+Attempt 1 failed the build: `packages.txt` contained comments, and the builder
+runs `xargs -r -a /tmp/packages.txt apt-get install -y`, so every comment word
+became a package name.
+
+Attempt 2 built, then the Space died during startup with two log lines and no
+traceback — a killed process. At that point `HF_HOME` was still unset, so the
+~90 MB of model weights downloaded into **ephemeral container disk** on top of
+a freshly-rebuilt image.
+
+Between then and now, Phase 0.11 moved `HF_HOME` onto the mounted bucket for
+an unrelated reason (cold-start time). That takes the model cache off
+ephemeral disk, which is a genuine change to the resource that attempt 2
+appeared to exhaust — so this was a different experiment, not a repeat.
+
+It was still run with automatic rollback: on any non-`RUNNING` stage the
+script deletes `packages.txt` from the Space and waits for recovery, so a
+failure could not leave the Space down.
+
+### Verified live
+
+| Input | Result |
+|---|---|
+| Synthetic PNG, two lines | 1 page, 1 node, 13 words · "Arnav Deshpande is a machine learning engineer. [1]" at 0.4305 |
+| **Real UI screenshot** (420 KB frame from the screencast) | 1 page, 2 nodes, **206 words** |
+| Question against that screenshot | Correctly reported which document had failed to read — i.e. it read the error text inside the image |
+
+`tesseract-ocr` and `tesseract-ocr-eng` are now in `space/packages.txt`, which
+`tools/build_space.py` carries into the bundle. The file holds bare package
+names only, with the `xargs` constraint recorded in the build script so the
+first mistake is not repeated.
+
+### What this closes and what it does not
+
+Closes: images (PNG/JPG) and scanned PDFs without a text layer are now
+readable on the Space.
+
+Does not close: OCR quality is Tesseract's, on a CPU, with no
+deskew/denoise beyond what `ingestion/ocr.py` already does. `ocr_confidence`
+and `is_low_quality` are reported per page and should be believed — a poor
+scan will produce poor text, and the pipeline says so rather than hiding it.
