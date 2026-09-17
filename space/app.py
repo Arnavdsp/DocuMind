@@ -19,9 +19,50 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import gradio as gr
+# This Space has decided to generate via Groq. Settings' own default is "auto",
+# which deliberately never selects the Groq backend — a key present in the
+# environment must not silently change which backend answers. Declaring it here,
+# in the deployment's own entry point, keeps that choice explicit and visible
+# rather than implicit. setdefault so an operator can still override it.
+os.environ.setdefault("MODEL_BACKEND", "groq")
 
-import pipeline
+# Force CPU, and mean it. ZeroGPU runs torch in CUDA-emulation mode where
+# torch.cuda.is_available() answers True, so auto-detection picks "cuda",
+# sentence-transformers then triggers a real CUDA init outside any
+# @spaces.GPU function, and ZeroGPU aborts the call with
+# "Low-level CUDA init reached". Both local models are ~90 MB and run fine on
+# CPU, and generation is an HTTP call, so nothing here wants a GPU anyway.
+os.environ.setdefault("MODEL_DEVICE", "cpu")
+
+# Translate via Groq rather than deep_translator's Google endpoint. That
+# endpoint rate-limits by source IP and Spaces share egress IPs, so it returns
+# "too many requests" here no matter how little this app sends — verified
+# against the live Space, not assumed.
+os.environ.setdefault("TRANSLATION_PROVIDER", "groq")
+
+# A bucket is mounted at /data on this Space. Only the MODEL CACHE goes there.
+#
+# DATA_DIR deliberately does NOT: NumpyVectorStore writes chunk *text* into its
+# .npz files, and this bucket is public, so pointing DATA_DIR at the mount
+# published every visitor's uploaded document at a public URL — while the
+# README continued to promise "uploads are session-scoped and are not
+# persisted". Document state therefore stays on ephemeral container disk,
+# which is what that promise describes.
+#
+# Model weights are a different case: they are public upstream models, nothing
+# private is disclosed by caching them, and it saves ~90 MB of download on
+# every cold start.
+_DATA_MOUNT = "/data"
+if os.path.isdir(_DATA_MOUNT) and os.access(_DATA_MOUNT, os.W_OK):
+    os.environ.setdefault("HF_HOME", f"{_DATA_MOUNT}/.cache/huggingface")
+
+# SSR is deliberately left at the platform default. Disabling it was tried and
+# the Space then failed to start at all — it never reached "Running on local
+# URL" — so the Node SSR proxy is load-bearing on this tier. Document identity
+# does not depend on it either way: it lives in a visible textbox rather than
+# a per-session gr.State, precisely so no rendering mode can strand it.
+import gradio as gr  # noqa: E402
+import pipeline  # noqa: E402
 
 # ZeroGPU requires at least one decorated entry point to schedule a Space.
 # Nothing here actually needs a GPU: generation is an API call and both local
@@ -41,6 +82,53 @@ except ImportError:  # running locally
 
 DEMO_DIR = Path(__file__).parent / "corpus"
 EM_DASH = "—"
+
+
+def _theme() -> gr.themes.Base:
+    """A theme whose tokens are dark in light mode too.
+
+    The CSS below forces a dark page background. Gradio, however, renders in
+    light mode unless the visitor asks otherwise, so its own components kept
+    their light-mode text colours — dark text on a dark page, invisible unless
+    you selected it. Styling the background without also owning the text
+    colour is what caused that, so the tokens are set here rather than fought
+    in CSS, and the *_dark variants are set to the same values so the page
+    looks identical whichever mode the browser prefers.
+    """
+    slate = gr.themes.Base(primary_hue="blue", neutral_hue="slate")
+    return slate.set(
+        body_background_fill="#070b12",
+        body_background_fill_dark="#070b12",
+        body_text_color="#c8e4f0",
+        body_text_color_dark="#c8e4f0",
+        body_text_color_subdued="#7fa6bb",
+        body_text_color_subdued_dark="#7fa6bb",
+        block_background_fill="#0c1420",
+        block_background_fill_dark="#0c1420",
+        block_border_color="#1d3446",
+        block_border_color_dark="#1d3446",
+        block_label_text_color="#9ed6ec",
+        block_label_text_color_dark="#9ed6ec",
+        block_title_text_color="#9ed6ec",
+        block_title_text_color_dark="#9ed6ec",
+        block_info_text_color="#7fa6bb",
+        block_info_text_color_dark="#7fa6bb",
+        input_background_fill="#0f1a28",
+        input_background_fill_dark="#0f1a28",
+        input_border_color="#1d3446",
+        input_border_color_dark="#1d3446",
+        border_color_primary="#1d3446",
+        border_color_primary_dark="#1d3446",
+        panel_background_fill="#0c1420",
+        panel_background_fill_dark="#0c1420",
+        table_text_color="#c8e4f0",
+        table_text_color_dark="#c8e4f0",
+        table_even_background_fill="#0c1420",
+        table_even_background_fill_dark="#0c1420",
+        table_odd_background_fill="#0f1a28",
+        table_odd_background_fill_dark="#0f1a28",
+    )
+
 
 CSS = """
 :root {
@@ -80,6 +168,23 @@ CSS = """
 .dm-abstain {
   border-left: 2px solid var(--dm-quiet); padding: 12px 15px;
   background: rgba(58, 98, 113, 0.12); color: #b9d4e0;
+}
+/* Markdown and table bodies render their own text; the theme tokens above do
+   not always reach inside them, and unreadable output is worse than ugly
+   output. */
+.gradio-container .prose, .gradio-container .prose * { color: #c8e4f0 !important; }
+.gradio-container .prose h1, .gradio-container .prose h2,
+.gradio-container .prose h3 { color: #eafaff !important; }
+.gradio-container table td, .gradio-container table th { color: #c8e4f0 !important; }
+.gradio-container textarea, .gradio-container input[type="text"] {
+  color: #eafaff !important; background: #0f1a28 !important;
+}
+.gradio-container label, .gradio-container .svelte-1gfkn6j { color: #9ed6ec !important; }
+/* Inline code keeps a light chip background from the base theme, which
+   renders as dark-on-light inside an otherwise dark card. */
+.gradio-container code, .gradio-container pre {
+  background: #0f1a28 !important; color: #6ee7d7 !important;
+  border: 1px solid #1d3446 !important;
 }
 """
 
@@ -131,10 +236,14 @@ def _nodes_svg(citations, total_chunks: int, page_count: int) -> str:
 
     return (
         f'<div class="dm-card"><div class="dm-note" style="margin-bottom:8px">'
-        f'MEMORY NODES · {total_chunks} indexed · {page_count} pages</div>'
+        f"MEMORY NODES · {total_chunks} indexed · {page_count} pages</div>"
         f'<svg viewBox="0 0 {width} {height + 44}" width="100%" style="display:block">'
         f'{"".join(dots)}{legend_label}{"".join(legend)}</svg></div>'
     )
+
+
+def _warn(message: str) -> str:
+    return f'<div class="dm-card dm-warn">{message}</div>'
 
 
 def _ms(value: float | None) -> str:
@@ -143,6 +252,20 @@ def _ms(value: float | None) -> str:
 
 
 def _status_bar() -> str:
+    """Never raises. This runs while the Blocks tree is being built, so an
+    exception here aborts module import and the Space dies with a blank 503
+    and no traceback — the operator learns nothing. A backend that cannot
+    introduce itself is worth reporting, not worth crashing over."""
+    try:
+        return _status_bar_inner()
+    except Exception as exc:
+        return _warn(
+            f"The model backend could not be queried at startup: {exc}. "
+            "The interface is up; individual actions will report their own errors."
+        )
+
+
+def _status_bar_inner() -> str:
     info = pipeline.device_info()
     rows = "".join(
         f'<div><span class="k">{k}</span><span class="v">{v}</span></div>' for k, v in info.items()
@@ -154,22 +277,78 @@ def _status_bar() -> str:
             "page are not meaningful quantities and abstention will not trigger reliably. "
             "Set MODEL_BACKEND and GROQ_API_KEY for real behaviour.</div>"
         )
+    storage = pipeline.storage_warning()
+    if storage:
+        warn += f'<div class="dm-warn">{storage}</div>'
+
     return (
         f'<div class="dm-card"><div class="dm-note">BACKEND</div>'
         f'<div class="dm-kv"><div><span class="k">model</span>'
-        f'<span class="v">{pipeline.backend_name()}</span></div>{rows}</div></div>{warn}'
+        f'<span class="v">{pipeline.backend_name()}</span></div>{rows}'
+        f'<div><span class="k">document storage</span>'
+        f'<span class="v">{pipeline.storage_location()} (ephemeral)</span></div>'
+        f"</div></div>{warn}"
     )
 
 
-def do_ingest(file_obj, state):
+def _evidence_tab() -> str:
+    """The published evaluation table — empty until the harness has run.
+
+    Every cell is an em-dash on purpose. The evaluation has not been executed
+    yet, and this project does not print a number it has not measured. Filling
+    these with plausible values would be the exact failure it exists to delete.
+    """
+    rows = "".join(
+        f"<tr style='border-top:1px solid rgba(126,178,214,0.12)'>"
+        f"<td style='padding:6px 4px'>{config}</td>"
+        f"<td>{EM_DASH}</td><td>{EM_DASH}</td><td>{EM_DASH}</td><td>{EM_DASH}</td></tr>"
+        for config in (
+            "Dense only (baseline)",
+            "+ BM25 hybrid",
+            "+ cross-encoder rerank",
+            "+ calibrated abstention",
+        )
+    )
+    return (
+        '<div class="dm-card">'
+        '<div class="dm-note" style="margin-bottom:10px">EVALUATION — NOT YET MEASURED</div>'
+        "<p style='color:#9ed6ec;font-size:0.86rem;line-height:1.6'>This tab will publish a "
+        "before/after table generated from committed, SHA-stamped result files: recall@4, "
+        "nDCG@10, false-answer rate and p50 latency across dense-only, +BM25 hybrid, "
+        "+cross-encoder rerank and calibrated abstention.</p>"
+        "<p style='color:#4d6b80;font-size:0.8rem;line-height:1.6'>It is empty because the "
+        "evaluation harness has not been run yet. Every cell stays an em-dash until a "
+        "committed result file fills it.</p>"
+        "<table style='width:100%;margin-top:12px;font-family:ui-monospace,monospace;"
+        "font-size:0.78rem;color:#9ed6ec;border-collapse:collapse'>"
+        "<tr style='color:#3a6271;text-align:left'><th style='padding:6px 4px'>CONFIG</th>"
+        "<th>RECALL@4</th><th>NDCG@10</th><th>FALSE-ANSWER</th><th>P50</th></tr>"
+        f"{rows}</table></div>"
+    )
+
+
+def do_ingest(file_obj):
+    """Read a document into memory and hand back its id.
+
+    The id is returned into a *visible* textbox rather than a hidden
+    gr.State. gr.State is per-browser-session, which made the Space's HTTP
+    API unusable (every call got a fresh state and every answer was "Load a
+    document first") and is fragile under Gradio's SSR mode. An explicit
+    handle works identically in the browser and over the API, and it shows
+    the user that a document really is loaded.
+    """
     if file_obj is None:
-        return state, gr.update(value="Choose a document first.", visible=True), "", ""
+        return "", _warn("Choose a document first."), "", ""
     try:
         result = pipeline.ingest(file_obj.name)
     except Exception as exc:
-        return state, gr.update(value=f"Could not read that document: {exc}", visible=True), "", ""
+        # Rendered as a styled card, not plain Markdown. When this was plain
+        # text it inherited Gradio's light-mode colour on a dark page and was
+        # invisible — an ingestion failure looked like nothing happening at
+        # all, and every later tab then said "read a document first" with no
+        # explanation anywhere on screen.
+        return "", _warn(f"Could not read that document — {exc}"), "", ""
 
-    state = {"document_id": result.document_id, "title": result.title}
     summary = (
         f'<div class="dm-card"><div class="dm-note">READ INTO MEMORY</div><div class="dm-kv">'
         f'<div><span class="k">document</span><span class="v">{result.title}</span></div>'
@@ -178,27 +357,59 @@ def do_ingest(file_obj, state):
         f'<div><span class="k">words</span><span class="v">{result.words:,}</span></div>'
         f"</div></div>"
     )
-    return state, gr.update(visible=False), summary, _nodes_svg([], result.chunks, result.pages)
+    return (
+        result.document_id,
+        "",
+        summary,
+        _nodes_svg([], result.chunks, result.pages),
+    )
 
 
-def do_ask(question, state):
-    if not state or "document_id" not in state:
-        return "Load a document first.", "", ""
+def _need_document(document_id) -> str | None:
+    if not document_id or not str(document_id).strip():
+        return '<div class="dm-card dm-abstain">Read a document into memory first.</div>'
+    return None
+
+
+def do_ask(question, document_id):
+    guard = _need_document(document_id)
+    if guard:
+        return guard, ""
     if not question or not question.strip():
-        return "Ask something.", "", ""
+        return '<div class="dm-card dm-abstain">Ask a question first.</div>', ""
 
-    document_id = state["document_id"]
     try:
-        result = pipeline.ask(document_id, question.strip())
+        result = pipeline.ask(document_id.strip(), question.strip())
     except Exception as exc:
-        return f"That request failed: {exc}", "", ""
+        return f'<div class="dm-card dm-warn">That request failed: {exc}</div>', ""
 
-    if result.abstained:
+    if result.abstained and result.abstain_kind == "generator":
+        # Retrieval succeeded; the passages simply do not answer the question.
+        # Saying "no pathway activated" here would blame retrieval for a
+        # generator decision, next to a score that plainly shows retrieval
+        # worked. The passages are shown because they are the explanation.
         answer = (
             f'<div class="dm-card dm-abstain"><div class="dm-note" style="margin-bottom:6px">'
-            f"NO PATHWAY ACTIVATED</div>{result.answer}<div class='dm-note' style='margin-top:8px'>"
-            f"This is a designed response, not an error. The strongest signal reached "
-            f"{result.top_score:.4f}, below the {pipeline._settings.min_relevance_score} floor.</div></div>"
+            f"EVIDENCE FOUND, BUT IT DOES NOT ANSWER THIS</div>{result.answer}"
+            f"<div class='dm-note' style='margin-top:8px'>Retrieval worked — the top passage "
+            f"scored {result.top_score:.4f}, above the "
+            f"{pipeline._settings.min_relevance_score} floor. The passages below are what was "
+            f"retrieved; they are on-topic but contain no answer. A document that poses a "
+            f"question without answering it produces exactly this.</div></div>"
+        )
+        lines = []
+        for i, c in enumerate(result.citations, start=1):
+            page = f"page {c.page_number}" if c.page_number else EM_DASH
+            lines.append(f"**[{i}]** {page} · relevance `{c.relevance_score:.4f}`\n\n> {c.snippet}\n")
+        citations_md = "\n".join(lines)
+    elif result.abstained:
+        answer = (
+            f'<div class="dm-card dm-abstain"><div class="dm-note" style="margin-bottom:6px">'
+            f"NO PATHWAY ACTIVATED</div>{result.answer}"
+            f"<div class='dm-note' style='margin-top:8px'>A designed response, not an error. "
+            f"Nothing in the document scored above the "
+            f"{pipeline._settings.min_relevance_score} floor; the strongest signal reached "
+            f"{result.top_score:.4f}.</div></div>"
         )
         citations_md = ""
     else:
@@ -218,38 +429,114 @@ def do_ask(question, state):
         f'<div><span class="k">search</span><span class="v">{_ms(result.search_ms)}</span></div>'
         f'<div><span class="k">rerank</span><span class="v">{_ms(result.rerank_ms)}</span></div>'
         f'<div><span class="k">generate</span><span class="v">{_ms(result.generate_ms)}</span></div>'
-        f'<div><span class="k">total</span><span class="v">{result.total_ms:.0f} ms</span></div>'
+        f'<div><span class="k">total</span><span class="v">{_ms(result.total_ms)}</span></div>'
         f'<div><span class="k">model</span><span class="v">{result.model_used}</span></div>'
         f"</div></div>"
     )
     nodes = _nodes_svg(
-        result.citations, pipeline.chunk_count(document_id), pipeline.page_count(document_id)
+        result.citations,
+        pipeline.chunk_count(document_id.strip()),
+        pipeline.page_count(document_id.strip()),
     )
-    return answer + telemetry + nodes, citations_md, ""
+    return answer + telemetry + nodes, citations_md
 
 
-def do_retrieve(question, state):
-    if not state or "document_id" not in state:
-        return [], "Load a document first."
+def do_retrieve(question, document_id):
+    guard = _need_document(document_id)
+    if guard:
+        return [], guard
     if not question or not question.strip():
-        return [], "Ask something."
-    rows, elapsed = pipeline.candidate_rows(state["document_id"], question.strip())
+        return [], '<div class="dm-note">Ask a question first.</div>'
+    try:
+        rows, elapsed = pipeline.candidate_rows(document_id.strip(), question.strip())
+    except Exception as exc:
+        return [], f'<div class="dm-card dm-warn">Retrieval failed: {exc}</div>'
     note = (
-        f'<div class="dm-note">{len(rows)} candidates retrieved in {elapsed:.0f} ms · '
+        f'<div class="dm-note">{len(rows)} candidates in {elapsed:.0f} ms · '
         f'"survives" shows which reached the generator after reranking</div>'
     )
     return rows, note
 
 
-with gr.Blocks(css=CSS, title="DocuMind", theme=gr.themes.Base()) as demo:
-    state = gr.State({})
+def do_summarize(document_id):
+    guard = _need_document(document_id)
+    if guard:
+        return guard, ""
+    try:
+        summary, strategy, elapsed = pipeline.summarize(document_id.strip())
+    except Exception as exc:
+        return f'<div class="dm-card dm-warn">Summarization failed: {exc}</div>', ""
 
+    meta = (
+        f'<div class="dm-card"><div class="dm-note">SUMMARY</div><div class="dm-kv">'
+        f'<div><span class="k">strategy</span><span class="v">{strategy}</span></div>'
+        f'<div><span class="k">elapsed</span><span class="v">{_ms(elapsed)}</span></div>'
+        f'<div><span class="k">model</span><span class="v">{pipeline.backend_name()}</span></div>'
+        f"</div></div>"
+    )
+
+    parts = [f"### Executive summary\n\n{summary.executive_summary}"]
+    if summary.key_findings:
+        parts.append("### Key findings\n\n" + "\n".join(f"- {k}" for k in summary.key_findings))
+    if summary.important_numbers:
+        parts.append("### Important numbers\n\n" + "\n".join(f"- {n}" for n in summary.important_numbers))
+    # Absent sections render as an em-dash rather than being hidden, so the
+    # reader can tell "the document has no methodology section" from "we did
+    # not look".
+    parts.append(f"### Methodology\n\n{summary.methodology or EM_DASH}")
+    parts.append(f"### Limitations\n\n{summary.limitations or EM_DASH}")
+    return meta, "\n\n".join(parts)
+
+
+def do_translate(document_id, target_language, source_language):
+    guard = _need_document(document_id)
+    if guard:
+        return guard, ""
+    if not target_language or not target_language.strip():
+        return '<div class="dm-card dm-abstain">Choose a target language.</div>', ""
+
+    target = target_language.strip().split()[0].lower()
+    try:
+        result, source, detected, provider, elapsed = pipeline.translate(
+            document_id.strip(), target, (source_language or "").strip() or None
+        )
+    except Exception as exc:
+        return f'<div class="dm-card dm-warn">Translation failed: {exc}</div>', ""
+
+    origin = "detected" if detected else ("declared" if source != "auto" else "undetermined")
+    reasons = {
+        "segment_missing": "a segment returned nothing",
+        "output_length_implausible": "the output is far shorter than its input",
+    }
+    dropped = (
+        f'<div class="dm-warn">CONTENT DROPPED — {reasons.get(result.dropped_reason, "see counts")}.' "</div>"
+        if result.content_dropped
+        else ""
+    )
+    ratio = result.length_ratio
+    meta = (
+        f'<div class="dm-card"><div class="dm-note">TRANSLATION</div><div class="dm-kv">'
+        f'<div><span class="k">source</span><span class="v">{source} ({origin})</span></div>'
+        f'<div><span class="k">target</span><span class="v">{target}</span></div>'
+        f'<div><span class="k">segments</span>'
+        f'<span class="v">{result.segments_translated}/{result.segments_total}</span></div>'
+        f'<div><span class="k">length ratio</span>'
+        f'<span class="v">{EM_DASH if ratio is None else f"{ratio:.2f}"}</span></div>'
+        f'<div><span class="k">elapsed</span><span class="v">{_ms(elapsed)}</span></div>'
+        f'<div><span class="k">provider</span><span class="v">{provider}</span></div>'
+        f"</div></div>{dropped}"
+    )
+    return meta, result.text
+
+
+with gr.Blocks(title="DocuMind") as demo:
     gr.HTML(
         '<div id="dm-head"><h1>DOCUMIND</h1>'
-        "<p>Grounded document intelligence — a document becomes memory, a question becomes a signal, "
-        "and the nodes it reaches are your citations. It declines when nothing activates.</p></div>"
+        "<p>Grounded document intelligence — a document becomes memory, a question becomes a "
+        "signal, and the nodes it reaches are your citations. It declines when nothing "
+        "activates.</p></div>"
     )
-    status = gr.HTML(_status_bar())
+    gr.HTML(_status_bar())
 
     with gr.Row():
         upload = gr.File(
@@ -258,7 +545,13 @@ with gr.Blocks(css=CSS, title="DocuMind", theme=gr.themes.Base()) as demo:
             scale=3,
         )
         ingest_btn = gr.Button("Read into memory", variant="primary", scale=1)
-    ingest_error = gr.Markdown(visible=False)
+
+    document_id = gr.Textbox(
+        label="Document handle",
+        info="Filled in when a document is read. Every tab below works off this value.",
+        interactive=False,
+    )
+    ingest_error = gr.HTML()
     ingest_summary = gr.HTML()
     ingest_nodes = gr.HTML()
 
@@ -266,20 +559,17 @@ with gr.Blocks(css=CSS, title="DocuMind", theme=gr.themes.Base()) as demo:
         with gr.Tab("Recall"):
             gr.Markdown(
                 "Ask a question. The answer is generated **only** from retrieved passages — "
-                "if they don't support an answer, it declines instead of guessing."
+                "if they don't support one, it declines instead of guessing."
             )
-            question = gr.Textbox(
-                label="Question", placeholder="What does this document say about…", lines=2
-            )
+            question = gr.Textbox(label="Question", lines=2)
             ask_btn = gr.Button("Ask", variant="primary")
             answer_out = gr.HTML()
-            citations_out = gr.Markdown(label="Citations")
+            citations_out = gr.Markdown()
 
         with gr.Tab("Activation"):
             gr.Markdown(
-                "The retrieval pool with the lid off — every candidate the index returned, its "
-                "score, and whether it survived reranking. Retrieval only: no generation, so this "
-                "is the cheapest way to see the mechanics."
+                "The retrieval pool with the lid off — every candidate, its score, and whether "
+                "it survived reranking. Retrieval only, no generation."
             )
             retr_question = gr.Textbox(label="Question", lines=2)
             retr_btn = gr.Button("Retrieve", variant="primary")
@@ -290,51 +580,69 @@ with gr.Blocks(css=CSS, title="DocuMind", theme=gr.themes.Base()) as demo:
                 wrap=True,
             )
 
-        with gr.Tab("Evidence"):
-            gr.HTML(
-                '<div class="dm-card">'
-                '<div class="dm-note" style="margin-bottom:10px">EVALUATION — NOT YET MEASURED</div>'
-                "<p style='color:#9ed6ec;font-size:0.86rem;line-height:1.6'>"
-                "This tab will publish a before/after table generated from committed result "
-                "files: recall@4, nDCG@10, false-answer rate and p50 latency across dense-only, "
-                "+BM25 hybrid, +cross-encoder rerank and calibrated abstention.</p>"
-                "<p style='color:#4d6b80;font-size:0.8rem;line-height:1.6'>"
-                "It is empty because the evaluation harness has not been run yet, and this "
-                "project does not print a number it has not measured. Every cell below stays an "
-                "em-dash until a committed, SHA-stamped result file fills it.</p>"
-                "<table style='width:100%;margin-top:12px;font-family:ui-monospace,monospace;"
-                "font-size:0.78rem;color:#9ed6ec;border-collapse:collapse'>"
-                "<tr style='color:#3a6271;text-align:left'>"
-                "<th style='padding:6px 4px'>CONFIG</th><th>RECALL@4</th><th>NDCG@10</th>"
-                "<th>FALSE-ANSWER</th><th>P50</th></tr>"
-                + "".join(
-                    f"<tr style='border-top:1px solid rgba(126,178,214,0.12)'>"
-                    f"<td style='padding:6px 4px'>{c}</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>"
-                    for c in [
-                        "Dense only (baseline)",
-                        "+ BM25 hybrid",
-                        "+ cross-encoder rerank",
-                        "+ calibrated abstention",
-                    ]
-                )
-                + "</table></div>"
+        with gr.Tab("Summarize"):
+            gr.Markdown(
+                "Short documents are summarized in one pass; long ones go through map-reduce "
+                "over page groups. The strategy that actually ran is reported."
             )
+            sum_btn = gr.Button("Summarize", variant="primary")
+            sum_meta = gr.HTML()
+            sum_out = gr.Markdown()
+
+        with gr.Tab("Translate"):
+            gr.Markdown(
+                "Whole-document translation, segmented on sentence boundaries. Segment counts "
+                "are reported so silent truncation would be visible."
+            )
+            with gr.Row():
+                target_lang = gr.Dropdown(
+                    label="Target language",
+                    choices=[
+                        "hi Hindi",
+                        "es Spanish",
+                        "fr French",
+                        "de German",
+                        "ja Japanese",
+                        "ar Arabic",
+                        "zh-CN Chinese",
+                        "en English",
+                    ],
+                    value="hi Hindi",
+                )
+                source_lang = gr.Textbox(
+                    label="Source language (optional)",
+                    placeholder="blank = detect offline",
+                )
+            tr_btn = gr.Button("Translate", variant="primary")
+            tr_meta = gr.HTML()
+            tr_out = gr.Textbox(label="Translated text", lines=12)
+
+        with gr.Tab("Evidence"):
+            gr.HTML(_evidence_tab())
 
     gr.HTML(
         '<div class="dm-note" style="margin-top:18px;padding-top:12px;'
         'border-top:1px solid rgba(126,178,214,0.16)">'
         "Uploads are session-scoped and are not persisted. · The full visualized experience — "
         "a Schwarzschild raytracer rendering the same backend — runs in the project's Colab "
-        "notebook, because a WebGL frontend cannot be hosted on this tier. Neither surface is a "
-        "cut-down version of the other.</div>"
+        "notebook, because a WebGL frontend cannot be hosted on this tier. Neither surface is "
+        "a cut-down version of the other.</div>"
     )
 
-    ingest_btn.click(
-        do_ingest, [upload, state], [state, ingest_error, ingest_summary, ingest_nodes]
-    )
-    ask_btn.click(do_ask, [question, state], [answer_out, citations_out, ingest_error])
-    retr_btn.click(do_retrieve, [retr_question, state], [retr_table, retr_note])
+    ingest_btn.click(do_ingest, [upload], [document_id, ingest_error, ingest_summary, ingest_nodes])
+    ask_btn.click(do_ask, [question, document_id], [answer_out, citations_out])
+    retr_btn.click(do_retrieve, [retr_question, document_id], [retr_table, retr_note])
+    sum_btn.click(do_summarize, [document_id], [sum_meta, sum_out])
+    tr_btn.click(do_translate, [document_id, target_lang, source_lang], [tr_meta, tr_out])
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+    # css and theme belong to launch() on Gradio 6; passing them to Blocks is
+    # accepted with a warning and then ignored, which silently dropped the
+    # entire DocuMind palette on the deployed Space.
+    demo.launch(
+        css=CSS,
+        theme=_theme(),
+        server_name="0.0.0.0",
+        server_port=int(os.environ.get("PORT", 7860)),
+    )

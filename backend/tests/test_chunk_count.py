@@ -17,9 +17,9 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-
 from app.schemas.documents import ProcessingStage
 from app.storage.repository import Repository
+
 from tests.conftest import read_fixture
 from tests.test_api_documents import _upload, _wait_until_ready
 
@@ -34,9 +34,7 @@ def test_document_record_defaults_chunk_count_to_none(tmp_path: Path):
 
 def test_chunk_count_round_trips(tmp_path: Path):
     repo = Repository(tmp_path / "app.db")
-    repo.create_document(
-        document_id="d1", filename="a.txt", content_type="text/plain", size_bytes=10
-    )
+    repo.create_document(document_id="d1", filename="a.txt", content_type="text/plain", size_bytes=10)
     repo.update_document_status("d1", status=ProcessingStage.READY, chunk_count=37)
     assert repo.get_document("d1").chunk_count == 37
 
@@ -44,9 +42,7 @@ def test_chunk_count_round_trips(tmp_path: Path):
 def test_chunk_count_survives_an_unrelated_status_update(tmp_path: Path):
     """COALESCE keeps it; a later status write must not wipe a real count."""
     repo = Repository(tmp_path / "app.db")
-    repo.create_document(
-        document_id="d1", filename="a.txt", content_type="text/plain", size_bytes=10
-    )
+    repo.create_document(document_id="d1", filename="a.txt", content_type="text/plain", size_bytes=10)
     repo.update_document_status("d1", status=ProcessingStage.READY, chunk_count=12)
     repo.update_document_status("d1", status=ProcessingStage.READY, error_message=None)
     assert repo.get_document("d1").chunk_count == 12
@@ -56,9 +52,7 @@ def test_zero_chunks_is_preserved_as_a_real_measurement(tmp_path: Path):
     """A measured 0 means an empty index. It must not be confused with
     'unknown', which is null."""
     repo = Repository(tmp_path / "app.db")
-    repo.create_document(
-        document_id="d1", filename="a.txt", content_type="text/plain", size_bytes=10
-    )
+    repo.create_document(document_id="d1", filename="a.txt", content_type="text/plain", size_bytes=10)
     repo.update_document_status("d1", status=ProcessingStage.READY, chunk_count=0)
     # COALESCE treats 0 as present, so it is stored rather than skipped.
     assert repo.get_document("d1").chunk_count == 0

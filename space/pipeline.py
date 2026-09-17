@@ -13,6 +13,7 @@ fabricated number.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -28,11 +29,54 @@ from app.rag.vector_store import NumpyVectorStore
 from app.schemas.qa import GroundingLevel
 from app.services.model_service import get_model_service
 from app.services.summarization_service import summarize_document
+from app.services.translation_service import get_translation_provider, translate_document
 
-_settings = get_settings()
-_vector_store = NumpyVectorStore(_settings.index_dir)
+
+def _open_storage():
+    """Settings + vector store, with a fallback that keeps the app alive.
+
+    Both of these run at import and both touch the filesystem: get_settings()
+    calls ensure_dirs(), and NumpyVectorStore mkdirs its index directory. If
+    DATA_DIR is unwritable — a bucket still mounting, a permissions change, a
+    full disk — either raises here, the module never finishes importing, and
+    the Space dies before rendering a single pixel. That failure shows up as a
+    blank 503 with no traceback, which is the worst possible way to learn
+    about a storage problem.
+
+    So a storage failure degrades to a temporary directory and is *reported*
+    on screen instead of taking the app down. Indexes written there do not
+    survive a restart, and the banner says exactly that rather than letting
+    the user assume their uploads are durable.
+    """
+    try:
+        settings = get_settings()
+        return settings, NumpyVectorStore(settings.index_dir), None
+    except Exception as exc:
+        import tempfile
+
+        fallback = Path(tempfile.mkdtemp(prefix="documind-fallback-"))
+        os.environ["DATA_DIR"] = str(fallback)
+        get_settings.cache_clear()
+        settings = get_settings()
+        warning = (
+            f"Configured storage is unavailable ({exc}). Running from a temporary "
+            f"directory instead — indexes will NOT survive a restart."
+        )
+        return settings, NumpyVectorStore(settings.index_dir), warning
+
+
+_settings, _vector_store, _storage_warning = _open_storage()
 _pages_by_document: dict[str, list] = {}
 _titles: dict[str, str] = {}
+
+
+def storage_warning() -> str | None:
+    """Non-null when storage fell back; the UI renders it as a banner."""
+    return _storage_warning
+
+
+def storage_location() -> str:
+    return str(_settings.data_dir)
 
 
 @dataclass(frozen=True)
@@ -53,6 +97,16 @@ class AskResult:
     citations: list
     candidates: list
     model_used: str
+    # Which of the two very different abstentions happened, if either:
+    #   "retrieval" — nothing scored above the floor; the document has no
+    #                 passage on this topic at all.
+    #   "generator" — passages WERE retrieved and scored well, but they do not
+    #                 contain an answer. A question paper is the clean example:
+    #                 it holds the question, not the answer.
+    # Reporting both as "no pathway activated" blames retrieval for a
+    # generator decision and leaves the reader staring at a high score next to
+    # a message saying nothing was found.
+    abstain_kind: str | None
     # None means the stage did not run — never 0 (NFR-5).
     embed_ms: float | None
     search_ms: float | None
@@ -131,14 +185,27 @@ def ask(document_id: str, question: str) -> AskResult:
     )
     finished = time.perf_counter()
 
+    if not abstained:
+        abstain_kind = None
+    elif retrieval.grounding == GroundingLevel.NONE or not retrieval.candidates:
+        abstain_kind = "retrieval"
+    else:
+        abstain_kind = "generator"
+
     return AskResult(
         answer=answer,
         abstained=abstained,
         grounding=retrieval.grounding,
         top_score=retrieval.top_score,
-        citations=[] if abstained else build_citations(retrieval.candidates),
+        # On a generator abstention the passages are still worth showing: they
+        # are what the model looked at and rejected, which is the whole
+        # explanation the reader needs.
+        citations=(
+            build_citations(retrieval.candidates) if not abstained or abstain_kind == "generator" else []
+        ),
         candidates=retrieval.candidates,
         model_used=model.backend_name,
+        abstain_kind=abstain_kind,
         # Read from the backend's own stage boundaries rather than timed from
         # out here, which could not separate embed from search from rerank.
         embed_ms=retrieval.embed_ms,
@@ -183,10 +250,47 @@ def candidate_rows(document_id: str, question: str) -> tuple[list[list], float]:
 
 
 def summarize(document_id: str):
+    """Structured summary plus the strategy that produced it.
+
+    Returns (StructuredSummary, strategy, elapsed_ms). `strategy` is "direct"
+    for short documents and "map_reduce" for long ones — reported rather than
+    inferred, so the caller can see which path ran.
+    """
     pages = _pages_by_document.get(document_id)
-    if not pages:
-        raise ValueError("That document is not loaded in this session.")
-    return summarize_document(pages, model_service=get_model_service(), settings=_settings)
+    if pages is None:
+        raise ValueError("That document is not loaded. Read it into memory first.")
+    started = time.perf_counter()
+    summary, strategy = summarize_document(pages, model_service=get_model_service(), settings=_settings)
+    return summary, strategy, (time.perf_counter() - started) * 1000
+
+
+def translate(document_id: str, target_language: str, source_language: str | None = None):
+    """Translate the whole document, reporting real segment counts.
+
+    Segmentation and counting live in `app.services.translation_service`; this
+    only passes values through, so the Space and the API report identically.
+    """
+    pages = _pages_by_document.get(document_id)
+    if pages is None:
+        raise ValueError("That document is not loaded. Read it into memory first.")
+
+    full_text = "\n\n".join(p.text for p in pages if p.text)
+    provider = get_translation_provider(_settings.translation_provider, get_model_service())
+
+    # Three distinct cases kept distinct, exactly as the API route does it:
+    # declared by the caller, detected, or genuinely unknown ("auto").
+    declared = source_language or None
+    detected = provider.detect_language(full_text) if not declared else None
+    source = declared or detected or "auto"
+
+    started = time.perf_counter()
+    result = translate_document(provider, full_text, source=source, target=target_language)
+    elapsed = (time.perf_counter() - started) * 1000
+    return result, source, detected is not None, provider.name, elapsed
+
+
+def translation_enabled() -> bool:
+    return _settings.translation_provider != "none"
 
 
 def title_for(document_id: str) -> str:

@@ -759,3 +759,559 @@ empty-state behaviour — with nothing indexed the disk does not glow
 (`MIGRATION.md`). Coercing there fabricates no telemetry; it selects a render
 state. Left as-is deliberately, recorded so the audit in Phase 6 does not
 re-flag them as defects.
+
+---
+
+## Phase 0.7 — DocuMind Space deployed
+
+**Status:** live at https://huggingface.co/spaces/ADP123456/DocuMind
+**Direct:** https://adp123456-documind.hf.space
+**Hardware:** `zero-a10g` (ZeroGPU), public, free account
+
+### Authentication
+
+`hf auth login` device flow, authorised in a browser by Arnav. No credential
+was generated, requested inline, or written to any file (R8/NFR-11). The Groq
+key is a Space **secret**, set via `hf spaces secrets add`; it is not visible
+to visitors and appears in no committed file.
+
+### Build failures and what they corrected
+
+The Space requirements could **not** simply mirror `backend/requirements.txt`.
+Two real conflicts, both fixed by reading the resolver output rather than
+guessing:
+
+1. **`pydantic==2.13.5` vs gradio.** The Space image installs
+   `gradio[oauth,mcp]`, and the `mcp` extra caps `pydantic<=2.12.5`. Mirroring
+   the backend's exact pin made the build unresolvable. Loosened to
+   `pydantic>=2.7,<2.13` in the Space only; the backend keeps its exact pins.
+
+2. **`transformers<5` vs `huggingface-hub`.** Every `sentence-transformers<6`
+   pulls `transformers<5`, which caps `huggingface-hub<1.0` — but the image
+   ships hub ≥1.0 for gradio 6. Resolved by moving the Space to
+   `sentence-transformers>=6,<7`, which requires `transformers>=5` and
+   `hub>=1.3`. `transformers` is no longer listed separately.
+
+This is a deliberate, recorded divergence: `backend/requirements-ml.txt`
+targets Colab and stays on the 3.x/4.x line; the Space targets the HF image.
+
+Also corrected against the platform rules: `gradio` and `spaces` are **not**
+listed (locked by `sdk_version:` frontmatter and platform-pinned
+respectively), and `torch` is left unpinned so the runtime supplies a
+supported build.
+
+### MODEL_BACKEND
+
+The CLI exposes no command for non-secret Space variables, so the Space sets
+`os.environ.setdefault("MODEL_BACKEND", "groq")` at the top of its own
+`app.py`. `Settings`' default stays `"auto"`, which still never selects Groq —
+the deployment makes the choice explicitly, in its own entry point, rather
+than a key in the environment silently changing which backend answers.
+
+### Verified
+
+- `GET /` → HTTP 200, `<title>DocuMind</title>`
+- `GET /gradio_api/info` → three named endpoints: `/do_ingest`, `/do_ask`,
+  `/do_retrieve`
+- Live logs show `config_sentence_transformers.json` downloading and **no**
+  `groq_local_delegate_is_mock` warning, so embeddings are real on the Space
+- The identical bundle driven in a real browser (Chromium, local instance over
+  plain HTTP): all three tabs render, ingestion reports `MEMORY NODES 1 ·
+  WORDS 82`, and the question *"What was the recall@4 for the hybrid
+  configuration?"* returned **"The recall@4 for the hybrid configuration was
+  71.2 percent【1】"** with grounding `strong`, top signal `0.6807`, and
+  per-stage telemetry `EMBED 0 ms · SEARCH 0 ms · RERANK 0 ms · GENERATE
+  945 ms · TOTAL 945 ms`
+
+The local browser run showed the STAND-IN EMBEDDINGS banner because that
+environment has no `torch`. That is the disclosure path working, and it is
+absent on the Space itself.
+
+### Known limitations
+
+- **The Space's HTTP API cannot hold a document.** `gr.State` is per-session,
+  so `gradio_client` callers get a fresh state each call and `/do_ask` replies
+  "Load a document first." The browser path is unaffected. Recorded rather
+  than worked around; a document-id-keyed handle would fix it if the API
+  surface is ever wanted.
+- No preloaded corpus yet, so a visitor must upload before anything happens.
+- Summarize and translate still have no tabs, so R4 (all three pipelines at a
+  phase boundary) is **not** met.
+- The Evidence tab remains all em-dashes until the harness runs.
+
+---
+
+## Phase 0.8 — All three pipelines live (R4)
+
+**Status:** done. Ask, Summarize and Translate all verified against the live Space.
+**Tests:** 114 → **118**
+
+### The bug that broke Q&A on the Space
+
+```
+Low-level CUDA init (`torch._C._cuda_init`) reached. ZeroGPU's PyTorch CUDA
+emulation mode did not intercept a CUDA operation in your code.
+```
+
+`HFModelService._detect_device()` chose its device with
+`torch.cuda.is_available()`. On ZeroGPU that returns **True** under CUDA
+emulation, so sentence-transformers loaded onto `cuda`, triggering a real CUDA
+init outside any `@spaces.GPU` function — which ZeroGPU rejects outright.
+Ingestion failed, so every subsequent tab reported "Read a document first".
+
+The design intent was always CPU-only (both models are ~90 MB, generation is
+an HTTP call). The flaw was that the intent was never *expressed* — it was
+inferred from a probe that answers misleadingly on this platform.
+
+**Fix:** `model_device: Literal["auto","cpu","cuda"] = "auto"`. When set, it
+is honoured without importing torch at all. A test enforces that by making
+`import torch` raise if reached; a second test asserts `"auto"` still probes,
+so the fix is not indistinguishable from hardcoding CPU.
+
+### Two other Gradio 6 breakages
+
+- `css` and `theme` on the `Blocks` constructor are accepted with a warning
+  and then **ignored** — the entire DocuMind palette was silently dropped on
+  the deployed Space. Both moved to `launch()`.
+- `show_copy_button` was removed from `Textbox`; it raised at import.
+
+Both were found by reading the Space's logs. The second only surfaced because
+the app was deployed without being booted locally first — the rewritten UI is
+now launched and browser-driven before every deploy.
+
+### `gr.State` replaced with an explicit document handle
+
+Document identity lived in a hidden `gr.State`, which is per-browser-session.
+That made the Space's HTTP API unusable — every call got fresh state and
+answered "Load a document first" — and is fragile under SSR. Identity now
+lives in a visible, read-only textbox that every tab reads. The browser path
+is unchanged; the API path now works, which is how these pipelines were
+verified. `GRADIO_SSR_MODE=false` is set, since this is a stateful session
+rather than a static page.
+
+### Translation moved to Groq
+
+`GoogleTranslateProvider` rate-limits by **source IP**. HF Spaces share egress
+IPs, so it returned "too many requests" on a single-segment 82-word document —
+reproduced from both this sandbox and the live Space, so it is structural, not
+transient.
+
+`05_ZERO_BUDGET_DEPLOYMENT_PLAN.md` §1.4 proposed a local model instead
+(m2m100_418M ~1.9 GB, or opus-mt pairs ~300 MB each). `GroqTranslationProvider`
+costs no extra disk, no extra download, stays at $0, and sidesteps the
+CC-BY-NC licence trap that rules out NLLB for an MIT repo.
+
+**Trade-off stated rather than hidden:** an instruction-tuned general model is
+not a dedicated NMT model. Translation quality should be measured by the
+harness (`03` §7.2: target-language ID rate, passthrough rate, length ratio,
+segment coverage, chrF) before any claim is made about it.
+
+`google` remains selectable and is still the default in `config.py`; only the
+Space overrides it to `groq`.
+
+### D9 closed
+
+`TranslateResponse.truncated` was passed `False` unconditionally. It now
+reports `segments_total > 1`, alongside new `segments_total`,
+`segments_translated` and `content_dropped` fields, all measured by
+`translate_document()`. That function was added **beside**
+`TranslationProvider.translate` rather than changing its signature, because
+existing tests pin that method's string return and existing tests are not
+edited to make new code fit.
+
+### Verified live
+
+| Pipeline | Result |
+|---|---|
+| **Ask** (grounded) | "The recall@4 for the hybrid configuration was 71.2 percent【1】" · grounding `strong` · top signal `0.5964` · embed 10 ms |
+| **Ask** (unanswerable) | **abstained** · "NO PATHWAY ACTIVATED" · top signal `0.1197`, below the 0.18 floor |
+| **Summarize** | strategy `direct`, 415 ms, structured executive summary + key findings + extracted numbers |
+| **Translate** → hi | `segments 1/1`, source `en (detected)`, 354 ms, numbers preserved |
+| **Translate** → fr | `segments 1/1`, 390 ms, `71,2 %` — correct locale formatting |
+
+`model_used` reads `groq:openai/gpt-oss-20b` with **no** "(embeddings: mock)"
+suffix, so the Space is running real MiniLM embeddings. Abstention only began
+working correctly once those were real — under mock embeddings the scores
+carry no meaning, exactly as the banner says.
+
+**R4 is now met**: all three pipelines work on the deployed backend.
+
+---
+
+## Phase 0.9 — Full systems check
+
+**Status:** done
+**Tests:** 118 → **134** (16 added, zero existing tests modified)
+
+Swept static checks, the FastAPI backend end to end against real Groq, every
+ingestion format, the long-document paths, and the live Space. Three real
+defects found and fixed; all three were of the same family — **output that
+looks fine while content is silently missing.**
+
+### BUG-1 — Truncated JSON rendered to the user as prose
+
+Found by running an 80-page document through the map-reduce summarizer.
+
+The reduce step emits a JSON object carrying up to 10 findings and 15 numbers.
+At `generation_max_new_tokens = 500` that object was cut mid-string,
+`json.loads` failed, and the fallback path put `cleaned[:1500]` straight into
+`executive_summary`. The user was shown a raw `{"executive_summary":"...`
+blob as the summary, with `key_findings` and `important_numbers` silently
+emptied — measured at **0 findings, 0 numbers** on a document that should have
+produced both.
+
+**Fixed two ways.** A dedicated `summarize_max_new_tokens = 1600` for
+structured calls (`_structured_budget()` never returns less than the plain
+generation budget, so raising one cannot starve the other). And
+`_salvage_executive_summary()`, which recovers the prose from a truncated
+object — a cut-off JSON object still usually carries a complete first field.
+When nothing can be salvaged the response says so rather than printing JSON
+syntax.
+
+Re-run on the same 80-page document: no raw JSON, **7 findings, 15 numbers**,
+and content from both the start and the end of the document.
+
+### BUG-2 — `content_dropped` reported clean while a third of the text vanished
+
+Segment counting only detects a whole missing segment. A model handed
+repetitive text returns every segment while collapsing content *inside* them.
+Measured through the real API: **5,520 characters in, 1,686 out, segments
+2/2, `content_dropped: false`.**
+
+**Fixed** with the length-ratio check `03` §7.2 already specifies.
+`TranslationResult` now carries `input_chars` and exposes `length_ratio` and
+`dropped_reason` (`segment_missing` | `output_length_implausible`).
+`_MIN_LENGTH_RATIO = 0.5` is deliberately conservative — some pairs
+legitimately compress — and the ratio is reported whether or not it looks
+suspect, so the reader can judge it.
+
+Verified against real translations:
+
+| Input | ratio | flagged |
+|---|---|---|
+| repetitive, 5520→1686 chars | 0.31 | **yes** — `output_length_implausible` |
+| varied prose, 6891→7244 chars | 1.05 | no |
+| short prose, 522→597 chars | 1.14 | no |
+
+No false positive on genuinely varied text.
+
+**Also recorded:** this is a measured weakness of translating with an
+instruction-tuned general model. On repetitive input it deduplicates rather
+than translating each occurrence. The detector surfaces it rather than hiding
+it, and it is a reason the harness's translation checks matter before any
+quality claim.
+
+### BUG-3 — A regression I introduced: `truncated` would have lied
+
+Phase 0.8 set `TranslateResponse.truncated = segments_total > 1`, matching the
+field's old docstring ("was chunked"). But `frontend/src/panels/frequency-panel.tsx`
+renders that field as:
+
+> "Output was truncated by the translation provider. What follows is not the
+> complete document."
+
+That is a content-loss claim. Bound to "was segmented", it would have fired on
+**every** multi-segment document and told users their translation was
+incomplete when it was not.
+
+**Fixed:** `truncated` now mirrors `content_dropped` — genuine loss only.
+Segmentation remains visible through `segments_total`. `types/api.ts` mirrors
+all new fields; `tsc --noEmit` clean.
+
+### Everything else checked and clean
+
+| Check | Result |
+|---|---|
+| `pytest backend/tests -q` | 134 passed, network-free, GPU-free |
+| R6 torch containment | only `services/model_service.py` |
+| Credential scan, working tree **and** full git history | zero occurrences |
+| AI attribution in history | zero; authors are Arnav only |
+| `ruff` + `black` on authored/modified files | clean |
+| `tsc --noEmit` | clean |
+| `vite build` | clean; scene still a separate 33.5 kB lazy chunk (NFR-13) |
+| Backend API: upload → poll → ask → summarize → translate → delete | all pass |
+| Summary caching (`cached: true` on second call) | pass |
+| Error paths: unknown document ×3 | 404; empty question → 422 |
+| PDF, 3 pages | `native_text`, 3 chunks, citation correctly anchored to page 2 |
+| Image/OCR | `ocr`, confidence 0.955, not low-quality |
+| Abstention on real embeddings | fires at top signal 0.1197 against the 0.18 floor |
+
+**Pre-existing lint findings left alone:** `test_ocr.py`,
+`test_pdf_extraction.py`, `test_document_validation.py`, `conftest.py` and
+`tools/build_notebook.py` (verbatim upstream) carry import-order findings that
+predate this work. The repository was never fully lint-clean; reformatting
+files this round did not touch would be noise in the diff.
+
+---
+
+## Phase 0.10 — Three defects reported from a user session
+
+Arnav recorded a screencast. Frame analysis (ffmpeg) plus Space logs identified
+three separate causes, only one of which was cosmetic.
+
+### BUG-4 — Invisible text (the reported symptom)
+
+The page rendered dark, Gradio's own components did not. Gradio renders in
+**light mode** unless the visitor's browser asks otherwise, and the app's CSS
+forced a dark `.gradio-container` background while leaving Gradio's text
+colours at their light-mode values — dark text on a dark page, readable only
+when selected. Tab labels, descriptions, the footer and, critically, **error
+messages** were all affected.
+
+Styling a background without also owning the text colour is the whole defect.
+**Fixed** by setting theme tokens (`body_text_color`, `block_*`, `input_*`,
+`table_*`) with their `*_dark` variants set to the same values, so the page
+looks identical whichever mode the browser prefers, plus targeted CSS for
+Markdown bodies, table cells and inline code, which the tokens do not always
+reach.
+
+Verified in Chromium with `color_scheme="light"` — the mode that produced the
+bug: body `rgb(7,11,18)`, text `rgb(200,228,240)`, answer text measured at
+`rgb(200,228,240)` on the dark card.
+
+### BUG-5 — The real blocker: OCR unavailable, failing silently
+
+The screencast shows `AA-312.pdf` loaded and **"Document handle" empty**. No
+handle means every tab correctly reports "read a document first", which is why
+ask, summarize and translate all appeared to produce nothing.
+
+Space logs show `ocr_failed`. `extractors.extract_pdf` falls back to OCR for
+pages with no text layer; `pytesseract` is only a Python wrapper around the
+`tesseract` binary, and **the Space had no `packages.txt`**, so the binary was
+never installed. Extraction returned empty text and the document was rejected.
+
+The failure was invisible because the error rendered through BUG-4. Ingestion
+errors now render as a styled `dm-warn` card rather than plain Markdown, so a
+rejected document can never again look like nothing happening.
+
+**The OCR fix itself is not landed.** Two attempts, both recorded rather than
+buried:
+
+1. `packages.txt` with explanatory comments **failed the build**. The Space
+   builder runs `xargs -r -a /tmp/packages.txt apt-get install -y`, so every
+   whitespace-separated token is treated as a package name and each comment
+   word became `E: Unable to locate package ...`. It takes bare package names
+   only.
+2. With comments removed the build passed, but the Space then died during
+   startup with **no Python traceback at all** — two log lines and silence,
+   which is a killed process rather than an exception. Adding `packages.txt`
+   forces a full image rebuild, and this repository's Space requirements use
+   ranges with `torch` unpinned, so a rebuild can resolve heavier versions
+   than the previously cached image.
+
+`packages.txt` was removed and deleted from the Space repo to restore service.
+**Scanned PDFs therefore still cannot be read on the Space.** Text-layer PDFs,
+`.txt`, PNG and JPG all work. Reintroducing OCR needs the image's heavy
+dependencies pinned first so the rebuild is reproducible rather than a
+resolver roll of the dice.
+
+### Not a bug — "DEVICE cpu"
+
+Arnav asked whether CPU indicates a problem or a Groq rate limit. Neither.
+Generation is an HTTP call to Groq, and both local models are ~90 MB and
+acceptable on CPU. It is also *required*: ZeroGPU rejects CUDA init outside a
+`@spaces.GPU` function (see Phase 0.8), and staying on CPU means no visitor
+GPU quota is consumed. A Groq rate limit surfaces as an HTTP 429 with a retry,
+not a device change.
+
+### Also fixed
+
+`GRADIO_SSR_MODE` was being set **after** `import gradio`, so it never took
+effect. Moving it before the import revealed that disabling SSR stops the
+Space from starting at all — it never reaches "Running on local URL" — so the
+Node SSR proxy is load-bearing on this tier. SSR is now left at the platform
+default, and the reasoning is recorded in the file so it is not retried
+blindly. Document identity does not depend on it either way, since it lives in
+a visible textbox rather than a per-session `gr.State`.
+
+---
+
+## Phase 0.11 — Mounted bucket: a correction and a privacy defect
+
+### Correction: buckets are not simply "paid"
+
+Told Arnav that HF Buckets are a paid feature, sourced from the
+`huggingface-spaces` skill's `references/buckets.md`, which opens "Buckets are
+paid (per-TB storage)" and then links "Pricing **+ free tier**". The first half
+was repeated as settled fact and the qualifier was dropped, which drove a real
+decision — Arnav was about to remove the bucket over it.
+
+The primary documentation says otherwise:
+
+> "As for other repositories, buckets are **free to create and have a free
+> storage allowance**." — https://huggingface.co/docs/hub/storage-buckets
+
+A free user account gets **100 GB private storage**; billing is per-TB only
+above the free tier. DocuMind stores a ~90 MB model cache, roughly 0.1% of the
+allowance. The bucket costs nothing at this scale and was kept.
+
+**Lesson recorded:** a secondhand source that links to a pricing page has not
+established a price. Check the primary source before a cost claim changes what
+someone does.
+
+### BUG-6 — Uploaded documents were published to a public bucket
+
+Wiring `DATA_DIR=/data` to gain persistence had a consequence not thought
+through. `NumpyVectorStore` writes **chunk text** into its `.npz` files, the
+mounted bucket is **public** (`private: False`), and public bucket objects are
+served at `https://huggingface.co/buckets/<ns>/<bucket>/resolve/<path>`.
+
+So every visitor's uploaded document became publicly downloadable — while the
+Space README continued to promise "Uploads are session-scoped and are not
+persisted". Confirmed by listing the bucket and finding
+`index/<document_id>.npz` present.
+
+**Fixed.** Only `HF_HOME` points at the mount now. Model weights are public
+upstream models, so caching them discloses nothing and still saves ~90 MB of
+download per cold start. `DATA_DIR` stays on ephemeral container disk, which is
+what the README's promise actually describes. The status row now reads
+`document storage … (ephemeral)` rather than implying durability.
+
+The published `.npz` files were deleted from the bucket, and the fix was
+verified by clearing `index/`, ingesting a fresh document through the live
+Space, and re-listing: the answer came back correctly and **nothing** reached
+the bucket.
+
+### Startup hardening kept
+
+The bucket also introduced a new way for the Space to die before first paint,
+since `pipeline.py` does filesystem work at import. That hardening (fallback
+to a temporary directory with an on-screen banner, and a `_status_bar()` that
+cannot raise) is retained regardless of whether a bucket is mounted — it
+applies to any unwritable `DATA_DIR`.
+
+---
+
+## Phase 0.12 — "Only translation works" — it wasn't a failure
+
+Second screencast. Frame analysis showed the opposite of what was reported:
+nothing had crashed.
+
+Frame at 0:70 shows `MEMORY NODES · 4 INDEXED · 2 PAGES` — `AA-312.pdf`
+ingested fine. It has a text layer, so the missing `tesseract` binary was
+never involved. Translation rendered the document and revealed what it is: a
+**physics question paper** (blackbody radiation, greenhouse effect, lapse
+rates), numbered 1–11.
+
+That explains both complaints:
+
+- **The summary.** In the earlier frame the document handle was still empty,
+  so `Summarize` correctly reported "read a document into memory first".
+  Reproduced against the live Space with an equivalent question paper:
+  summarization returns a real structured summary in ~300 ms.
+- **The question.** Reproduced too — and the system was right. Asking
+  *"Why does the stratosphere get warmer with height?"* is **verbatim question
+  4 of the document**. Retrieval scored `0.5165`, well above the floor, and the
+  generator then declined: the document poses that question, it does not
+  answer it.
+
+### BUG-7 — The UI blamed retrieval for a generator decision
+
+Both outcomes rendered as `NO PATHWAY ACTIVATED … the strongest signal reached
+0.5165`. A reader sees a high score beside a message saying nothing was found.
+They are two different events and were being reported as one:
+
+| Cause | What actually happened |
+|---|---|
+| `retrieval` | Nothing scored above `min_relevance_score`; the document has no passage on the topic |
+| `generator` | Passages were retrieved and scored well, but contain no answer |
+
+`AskResult.abstain_kind` now distinguishes them. A generator abstention reads
+**"EVIDENCE FOUND, BUT IT DOES NOT ANSWER THIS"**, states that retrieval
+worked and at what score, and — the important part — **shows the retrieved
+passages**, which were previously discarded on any abstention. Those passages
+are the explanation: on-topic, and answerless.
+
+Verified live on the question paper:
+
+| Question | Result |
+|---|---|
+| "Why does the stratosphere get warmer with height?" | generator abstention, 0.5165, 2 passages shown |
+| "What is the greenhouse effect?" | **answered** with citations |
+| "What is the capital of Brazil?" | generator abstention, **0.1870** |
+
+### The threshold is demonstrably miscalibrated (GAP-6)
+
+"What is the capital of Brazil?" is completely unrelated to a physics paper,
+and it **cleared the 0.18 floor by 0.007**. It was only caught because the
+generator refused.
+
+That is not a safety margin — it is the uncalibrated constant `00` §2 flags as
+GAP-6, now with a concrete failure case attached. The abstention gate is
+currently doing very little work on this corpus; the generator is carrying it.
+This is exactly what the threshold sweep in `03` §5.2 exists to fix, and it is
+now the strongest argument for doing the eval harness next.
+
+### Still not reproduced
+
+`tesseract` remains uninstalled, so a **scanned** PDF (no text layer) would
+still be rejected. `AA-312.pdf` was not such a document, so BUG-5's user-facing
+impact is smaller than assumed — but the gap is real and unfixed.
+
+---
+
+## Phase 0.13 — OCR landed (BUG-5 closed)
+
+**Status:** done, verified live
+
+### The question asked
+
+Arnav asked whether the inability to read a screenshot was a limitation of
+using Tesseract as the extractor. It was not. Tesseract was **not installed**
+on the Space at all — `pytesseract` is only a Python wrapper, and the binary
+requires `packages.txt`. Not a weak extractor; an absent one.
+
+This is also why `AA-312.pdf` worked perfectly while a PNG did not: that PDF
+carries a text layer, so `pdfplumber` reads it directly and OCR is never
+invoked. An image has no path except OCR.
+
+### Correction to an earlier claim
+
+Phase 0.10 and 0.11 both stated that "PNG and JPG work" on the Space. They did
+not. Image OCR had been verified **locally**, in a container where `tesseract`
+was apt-installed by hand early in the session, and never on the Space itself.
+The claim was carried forward twice without being re-checked against the
+deployment it described.
+
+### Why the retry worked when two earlier attempts had not
+
+Attempt 1 failed the build: `packages.txt` contained comments, and the builder
+runs `xargs -r -a /tmp/packages.txt apt-get install -y`, so every comment word
+became a package name.
+
+Attempt 2 built, then the Space died during startup with two log lines and no
+traceback — a killed process. At that point `HF_HOME` was still unset, so the
+~90 MB of model weights downloaded into **ephemeral container disk** on top of
+a freshly-rebuilt image.
+
+Between then and now, Phase 0.11 moved `HF_HOME` onto the mounted bucket for
+an unrelated reason (cold-start time). That takes the model cache off
+ephemeral disk, which is a genuine change to the resource that attempt 2
+appeared to exhaust — so this was a different experiment, not a repeat.
+
+It was still run with automatic rollback: on any non-`RUNNING` stage the
+script deletes `packages.txt` from the Space and waits for recovery, so a
+failure could not leave the Space down.
+
+### Verified live
+
+| Input | Result |
+|---|---|
+| Synthetic PNG, two lines | 1 page, 1 node, 13 words · "Arnav Deshpande is a machine learning engineer. [1]" at 0.4305 |
+| **Real UI screenshot** (420 KB frame from the screencast) | 1 page, 2 nodes, **206 words** |
+| Question against that screenshot | Correctly reported which document had failed to read — i.e. it read the error text inside the image |
+
+`tesseract-ocr` and `tesseract-ocr-eng` are now in `space/packages.txt`, which
+`tools/build_space.py` carries into the bundle. The file holds bare package
+names only, with the `xargs` constraint recorded in the build script so the
+first mistake is not repeated.
+
+### What this closes and what it does not
+
+Closes: images (PNG/JPG) and scanned PDFs without a text layer are now
+readable on the Space.
+
+Does not close: OCR quality is Tesseract's, on a CPU, with no
+deskew/denoise beyond what `ingestion/ocr.py` already does. `ocr_confidence`
+and `is_low_quality` are reported per page and should be believed — a poor
+scan will produce poor text, and the pipeline says so rather than hiding it.

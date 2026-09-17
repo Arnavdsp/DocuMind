@@ -72,7 +72,10 @@ def test_scores_are_bounded_to_the_unit_interval():
     encoder = MockModelService().get_cross_encoder(MODEL)
     pairs = [
         ("short", "short"),
-        ("a much longer query with many repeated repeated tokens", "a much longer query with many repeated repeated tokens"),
+        (
+            "a much longer query with many repeated repeated tokens",
+            "a much longer query with many repeated repeated tokens",
+        ),
         ("nothing", "shared"),
     ]
     for score in encoder.predict(pairs):

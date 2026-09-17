@@ -27,7 +27,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Space-specific presentation layer. No retrieval logic lives here.
-SPACE_FILES = ["app.py", "pipeline.py", "requirements.txt", "README.md"]
+# packages.txt is apt-installed by the Space builder; without it pytesseract
+# has no binary to call and OCR fails on every scanned document.
+#
+# It must contain ONLY bare package names, one per line. The builder runs
+# `xargs -r -a /tmp/packages.txt apt-get install -y`, so a comment line is
+# passed to apt as a list of package names and fails the whole build.
+SPACE_FILES = ["app.py", "pipeline.py", "requirements.txt", "packages.txt", "README.md"]
 
 EXCLUDE_PARTS = {"__pycache__", ".pytest_cache", ".venv", ".git"}
 

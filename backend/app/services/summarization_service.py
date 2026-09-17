@@ -55,6 +55,18 @@ def _group_pages_by_word_budget(pages: list[ExtractedPage], word_budget: int) ->
     return groups
 
 
+def _structured_budget(settings: Settings) -> int:
+    """Token budget for a structured-JSON call.
+
+    Never below the plain generation budget, so configuring one upward cannot
+    accidentally starve the other.
+    """
+    return max(
+        getattr(settings, "summarize_max_new_tokens", 0) or 0,
+        settings.generation_max_new_tokens,
+    )
+
+
 def _parse_structured_output(raw: str) -> StructuredSummary:
     cleaned = raw.strip()
     cleaned = re.sub(r"^```(json)?|```$", "", cleaned, flags=re.MULTILINE).strip()
@@ -68,10 +80,44 @@ def _parse_structured_output(raw: str) -> StructuredSummary:
             limitations=data.get("limitations") or None,
         )
     except (json.JSONDecodeError, AttributeError, TypeError):
-        # Generation didn't return valid JSON (small/mock models won't
-        # reliably follow format instructions) — degrade gracefully to a
-        # plain executive summary rather than failing the whole request.
+        # The model did not return parseable JSON. Small and mock models will
+        # not reliably follow a format instruction, and a long structured
+        # object can be cut mid-string by the token budget.
+        #
+        # The previous behaviour here was to put `cleaned[:1500]` straight into
+        # executive_summary — which, when the output was truncated JSON, meant
+        # rendering a raw `{"executive_summary":"...` blob to the user as
+        # though it were prose, with key_findings and important_numbers
+        # silently emptied. Salvage the prose instead, and say so when it
+        # cannot be salvaged.
+        salvaged = _salvage_executive_summary(cleaned)
+        if salvaged:
+            return StructuredSummary(executive_summary=salvaged)
+        if cleaned.lstrip().startswith("{"):
+            return StructuredSummary(
+                executive_summary=(
+                    "The summary could not be assembled: the model returned malformed "
+                    "or truncated structured output. Raw output withheld rather than "
+                    "shown as prose."
+                )
+            )
         return StructuredSummary(executive_summary=cleaned[:1500] or "No summary could be generated.")
+
+
+def _salvage_executive_summary(cleaned: str) -> str | None:
+    """Pull the executive_summary string out of truncated JSON.
+
+    A cut-off object still usually carries a complete first field. Recovering
+    it is strictly better than discarding the call, and strictly better than
+    showing the reader JSON syntax.
+    """
+    match = re.search(r'"executive_summary"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned)
+    if not match:
+        return None
+    try:
+        return json.loads(f'"{match.group(1)}"').strip() or None
+    except json.JSONDecodeError:
+        return None
 
 
 def summarize_document(
@@ -93,7 +139,7 @@ def summarize_document(
         raw = model_service.generate(
             _STRUCTURED_INSTRUCTIONS,
             full_text,
-            max_new_tokens=settings.generation_max_new_tokens,
+            max_new_tokens=_structured_budget(settings),
             temperature=settings.generation_temperature,
         )
         return _parse_structured_output(raw), "direct"
@@ -112,7 +158,7 @@ def summarize_document(
     raw = model_service.generate(
         _STRUCTURED_INSTRUCTIONS,
         synthesis_input,
-        max_new_tokens=settings.generation_max_new_tokens,
+        max_new_tokens=_structured_budget(settings),
         temperature=settings.generation_temperature,
     )
     return _parse_structured_output(raw), "map_reduce"
