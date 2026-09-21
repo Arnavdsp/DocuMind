@@ -22,7 +22,7 @@
 **Try DocuMind:**  
 https://huggingface.co/spaces/ADP123456/DocuMind
 
-The project is also structured as a deployable application rather than only a notebook/demo: the repository contains a dedicated backend, frontend, Docker deployment configuration, tests, tooling, and a persistent data layer. citeturn0view0turn0view1
+The project is also structured as a deployable application rather than only a notebook/demo: the repository contains a dedicated backend, frontend, Docker deployment configuration, tests, tooling, and a persistent data layer. 
 
 ---
 
