@@ -76,23 +76,3 @@ def build_reranker(*, reranker_model: str | None, model_service) -> Reranker:
     if reranker_model:
         return CrossEncoderReranker(reranker_model, model_service)
     return LexicalOverlapReranker()
-
-class CrossEncoderReranker:
-    def __init__(self, model_name='cross-encoder/ms-marco-MiniLM-L-6-v2'):
-        self.model_name = model_name
-        self._model = None
-
-    def _load(self):
-        from sentence_transformers import CrossEncoder
-        if self._model is None:
-            self._model = CrossEncoder(self.model_name)
-
-    def rerank(self, query, docs, top_k=5):
-        try:
-            self._load()
-            pairs = [(query, d['text']) for d in docs]
-            scores = self._model.predict(pairs)
-            ranked = sorted(zip(docs, scores), key=lambda x: -x[1])
-            return [d for d, _ in ranked[:top_k]]
-        except Exception:
-            return docs[:top_k]  # fallback: return by original rank

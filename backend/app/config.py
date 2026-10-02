@@ -119,10 +119,3 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_dirs()
     return settings
-
-# RAG tuning — all overridable via environment variables
-RAG_TOP_K_DENSE: int = int(os.getenv('RAG_TOP_K_DENSE', '20'))
-RAG_TOP_K_SPARSE: int = int(os.getenv('RAG_TOP_K_SPARSE', '20'))
-RAG_RERANK_TOP_K: int = int(os.getenv('RAG_RERANK_TOP_K', '5'))
-RAG_CHUNK_SIZE: int = int(os.getenv('RAG_CHUNK_SIZE', '512'))
-RAG_CHUNK_OVERLAP: int = int(os.getenv('RAG_CHUNK_OVERLAP', '64'))

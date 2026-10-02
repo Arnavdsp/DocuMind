@@ -512,21 +512,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-def rouge_l_recall(reference, hypothesis):
-    """
-    ROUGE-L recall: fraction of reference tokens found in hypothesis.
-    Used to assess faithfulness of generated answers to retrieved context.
-    """
-    ref_tokens = set(reference.lower().split())
-    hyp_tokens = set(hypothesis.lower().split())
-    if not ref_tokens:
-        return 0.0
-    return len(ref_tokens & hyp_tokens) / len(ref_tokens)
-
-
-def context_precision(retrieved_texts, ground_truth_answer):
-    """Proportion of retrieved chunks that contain the ground truth."""
-    gt = ground_truth_answer.lower()
-    hits = sum(1 for t in retrieved_texts if gt in t.lower())
-    return hits / len(retrieved_texts) if retrieved_texts else 0.0
