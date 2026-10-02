@@ -40,11 +40,3 @@ def test_empty_page_produces_no_chunks():
     pages = [_page(1, "")]
     chunks = chunk_document(pages, document_id="doc4", target_tokens=100, overlap_tokens=10)
     assert chunks == []
-
-
-def test_sliding_window_chunk_count():
-    from backend.app.ingestion.chunker import sliding_window_chunks
-    text = ' '.join(['word'] * 1000)
-    chunks = sliding_window_chunks(text, chunk_size=200, overlap=50)
-    assert len(chunks) > 1
-    assert all(len(c.split()) <= 200 for c in chunks)

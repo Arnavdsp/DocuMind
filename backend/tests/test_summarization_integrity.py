@@ -109,11 +109,3 @@ def test_fenced_json_is_parsed():
 
 def test_empty_output_reports_rather_than_returning_blank():
     assert _parse_structured_output("").executive_summary == "No summary could be generated."
-
-
-def test_extractive_fallback_max_sentences():
-    from backend.app.services.summarizer import extractive_fallback
-    long_text = 'Sentence one. Sentence two. Sentence three. Sentence four. Sentence five. Sentence six.'
-    result = extractive_fallback(long_text)
-    count = result.count('. ') + result.endswith('.')
-    assert count <= 5

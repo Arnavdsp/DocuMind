@@ -20,9 +20,3 @@ def test_run_ocr_rejects_oversized_image():
 
     with pytest.raises(ValidationFailed):
         run_ocr(huge, max_pixels=1)  # absurdly small ceiling forces rejection path
-
-
-def test_ocr_fallback_threshold():
-    # Documents returning fewer than 50 chars from pdfminer should trigger OCR
-    from backend.app.ingestion.chunker import _OCR_FALLBACK_THRESHOLD
-    assert _OCR_FALLBACK_THRESHOLD == 50

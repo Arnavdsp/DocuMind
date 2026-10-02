@@ -76,12 +76,3 @@ class DocumentListResponse(BaseModel):
 class DocumentUploadResponse(BaseModel):
     document: DocumentRecord
     job_id: str
-
-from pydantic import BaseModel
-
-class UploadResponse(BaseModel):
-    document_id: str
-    filename: str
-    num_chunks: int
-    language: str
-    status: str = 'indexed'

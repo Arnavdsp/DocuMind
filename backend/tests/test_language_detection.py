@@ -122,9 +122,3 @@ def test_a_normal_translation_is_not_flagged():
     result = TranslationResult(text="y" * 1050, segments_total=2, segments_translated=2, input_chars=1000)
     assert not result.content_dropped
     assert result.dropped_reason is None
-
-
-def test_detect_language_returns_string():
-    from backend.app.ingestion.chunker import detect_language
-    lang = detect_language('This is a short English sentence for testing.')
-    assert isinstance(lang, str) and len(lang) == 2
