@@ -158,6 +158,13 @@ def test_job_of_a_restarted_process_with_the_same_pid_is_not_reused(tmp_path):
     assert second.job_id != first.job_id
 
 
+def test_job_without_a_recorded_owner_is_reused(tmp_path):
+    # jobs created before owners were recorded can't be checked, so they count as alive
+    _, first, second, created = _claim_with_owner(tmp_path, None)
+    assert not created
+    assert second.job_id == first.job_id
+
+
 def test_job_owned_by_another_host_is_reused(tmp_path):
     _, first, second, created = _claim_with_owner(tmp_path, "some-other-host:1:abc")
     assert not created

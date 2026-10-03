@@ -103,6 +103,9 @@ class Repository:
         self._lock = threading.Lock()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Take the write lock before checking columns, so two processes opening
+            # an old database at once can't both try to add the same column.
+            conn.execute("BEGIN IMMEDIATE")
             self._migrate(conn)
 
     @staticmethod
