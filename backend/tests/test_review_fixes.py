@@ -318,6 +318,30 @@ def test_upload_deleted_before_its_write_is_a_conflict(client, monkeypatch):
     assert resp.json()["detail"]["error_code"] == "upload_conflict"
 
 
+def test_failed_raw_save_does_not_touch_a_replacement_upload(client, monkeypatch):
+    from app.dependencies import get_blob_store, get_repository
+
+    repository, blob_store = get_repository(), get_blob_store()
+    raw = read_fixture("sample.txt")
+    replacement = {}
+
+    def delete_reupload_then_fail(document_id, extension, data):
+        # meanwhile: the document is deleted and the same file uploaded again
+        repository.delete_document(document_id)
+        replacement["job"], _ = repository.claim_upload(
+            document_id=document_id, filename="again.txt", content_type="text/plain", size_bytes=len(data)
+        )
+        raise OSError("disk full")
+
+    monkeypatch.setattr(blob_store, "save_raw", delete_reupload_then_fail)
+    with pytest.raises(OSError):
+        _upload(client, "sample.txt", raw, "text/plain")
+
+    job = repository.get_job(replacement["job"].job_id)
+    assert job.status == JobStatus.PENDING
+    assert repository.get_document(job.document_id).status == ProcessingStage.UPLOADING
+
+
 def test_oversized_upload_is_rejected(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "max_upload_bytes", 10)
