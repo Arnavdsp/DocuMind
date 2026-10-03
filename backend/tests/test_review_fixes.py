@@ -165,6 +165,16 @@ def test_job_without_a_recorded_owner_is_reused(tmp_path):
     assert second.job_id == first.job_id
 
 
+def test_ownerless_jobs_can_be_failed_after_an_upgrade(tmp_path):
+    repository, first, _, _ = _claim_with_owner(tmp_path, None)
+    assert repository.fail_ownerless_active_jobs() == 1
+    assert repository.get_job(first.job_id).status == JobStatus.FAILED
+
+    kwargs = dict(document_id="c" * 32, filename="c.txt", content_type="text/plain", size_bytes=1)
+    _, created = repository.claim_upload(**kwargs)
+    assert created
+
+
 def test_job_owned_by_another_host_is_reused(tmp_path):
     _, first, second, created = _claim_with_owner(tmp_path, "some-other-host:1:abc")
     assert not created

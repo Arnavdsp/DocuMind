@@ -331,6 +331,29 @@ class Repository:
                 )
         return self.get_job(job_id), created  # type: ignore[return-value]
 
+    def fail_ownerless_active_jobs(self) -> int:
+        """Fail pending/running jobs that were created before owners were recorded.
+
+        claim_upload can't tell whether such a job's worker is still alive, so it
+        keeps handing it back. Run this once after upgrading, when every process
+        running the old code has stopped (see app.storage.maintenance). Returns the
+        number of jobs failed.
+        """
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET status = ?, stage = ?, error_message = ?, updated_at = ? "
+                "WHERE owner IS NULL AND status IN (?, ?)",
+                (
+                    JobStatus.FAILED.value,
+                    ProcessingStage.FAILED.value,
+                    "Ingestion stopped before finishing.",
+                    _now(),
+                    JobStatus.PENDING.value,
+                    JobStatus.RUNNING.value,
+                ),
+            )
+            return cur.rowcount
+
     def get_job(self, job_id: str) -> JobRecord | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
