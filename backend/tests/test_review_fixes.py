@@ -227,7 +227,7 @@ def test_ingestion_for_a_deleted_document_writes_nothing(temp_data_dir):
     run_ingestion(
         document_id=document_id,
         job_id=job.job_id,
-        extension="txt",
+        extension=".txt",
         raw_bytes=raw,
         repository=repository,
         blob_store=blob_store,
@@ -240,6 +240,82 @@ def test_ingestion_for_a_deleted_document_writes_nothing(temp_data_dir):
     assert not vector_store.exists(document_id)
     assert repository.get_document(document_id) is None
     assert repository.get_job(job.job_id).status == JobStatus.FAILED
+
+
+def test_delete_waits_for_an_in_progress_write_and_nothing_is_left(temp_data_dir, monkeypatch):
+    import threading
+    import time
+
+    from app.api.routes.documents import remove_document
+    from app.dependencies import get_blob_store, get_repository, get_vector_store
+    from app.services.ingestion_pipeline import run_ingestion
+    from app.services.model_service import get_model_service
+
+    repository, blob_store, vector_store = get_repository(), get_blob_store(), get_vector_store()
+    raw = read_fixture("sample.txt")
+    document_id = "a1" * 16
+    job, _ = repository.claim_upload(
+        document_id=document_id, filename="s.txt", content_type="text/plain", size_bytes=len(raw)
+    )
+
+    # a delete arrives while the worker is writing pages
+    save_pages = blob_store.save_pages
+    deleter = threading.Thread(target=remove_document, args=(document_id, repository, blob_store, vector_store))
+
+    present_during_write = []
+
+    def slow_save(doc_id, pages):
+        deleter.start()
+        time.sleep(0.2)  # the delete is now waiting on the document lock
+        present_during_write.append(repository.get_document(doc_id) is not None)
+        save_pages(doc_id, pages)
+
+    monkeypatch.setattr(blob_store, "save_pages", slow_save)
+    run_ingestion(
+        document_id=document_id,
+        job_id=job.job_id,
+        extension=".txt",
+        raw_bytes=raw,
+        repository=repository,
+        blob_store=blob_store,
+        vector_store=vector_store,
+        model_service=get_model_service(),
+        settings=get_settings(),
+    )
+    deleter.join(timeout=5)
+
+    assert present_during_write == [True]  # the delete waited for the write
+    assert repository.get_document(document_id) is None
+    assert blob_store.load_pages(document_id) == []
+    assert not vector_store.exists(document_id)
+    assert repository.get_job(job.job_id).status == JobStatus.FAILED
+
+
+def test_lock_files_are_bounded(tmp_path):
+    from app.storage.blob_store import DocumentBlobStore
+
+    store = DocumentBlobStore(tmp_path)
+    for i in range(600):
+        with store.lock(f"{i:032x}"):
+            pass
+    assert len(list((tmp_path / ".locks").iterdir())) <= 256
+
+
+def test_upload_deleted_before_its_write_is_a_conflict(client, monkeypatch):
+    from app.dependencies import get_repository
+
+    repository = get_repository()
+    claim = repository.claim_upload
+
+    def claim_then_delete(**kwargs):
+        result = claim(**kwargs)
+        repository.delete_document(kwargs["document_id"])
+        return result
+
+    monkeypatch.setattr(repository, "claim_upload", claim_then_delete)
+    resp = _upload(client, "sample.txt", read_fixture("sample.txt"), "text/plain")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "upload_conflict"
 
 
 def test_oversized_upload_is_rejected(client, monkeypatch):

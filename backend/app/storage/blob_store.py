@@ -7,15 +7,24 @@ hit, not reprocessing) and duplicate detection for free.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.ingestion.extractors import ExtractedPage
 from app.schemas.documents import ExtractionMethod
 
 _DOCUMENT_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+# Locks are striped over a fixed set of files (by the id's first byte) so the
+# lock directory never grows, and a delete never has to remove a lock file
+# someone else may be waiting on. Two documents sharing a stripe only wait on
+# each other briefly; each operation takes a single lock, so it can't deadlock.
+_LOCK_STRIPES = 256
 
 
 def compute_document_id(data: bytes) -> str:
@@ -33,6 +42,25 @@ class DocumentBlobStore:
         if not _DOCUMENT_ID_RE.fullmatch(document_id):
             raise ValueError("invalid document_id")
         return self._root / document_id
+
+    @contextmanager
+    def lock(self, document_id: str) -> Iterator[None]:
+        """Exclusive per-document lock, across threads and worker processes on
+        this host. Ingestion holds it while it checks that its job still owns the
+        document and writes to storage; a delete holds it while it removes the
+        document. So a write can't land after a delete, and nothing is left to
+        clean up afterwards. Lock files sit outside the documents' directories,
+        which a delete removes."""
+        self._doc_dir(document_id)  # validates the id: 32 hex characters
+        stripe = int(document_id[:2], 16) % _LOCK_STRIPES
+        lock_dir = self._root / ".locks"
+        lock_dir.mkdir(exist_ok=True)
+        with open(lock_dir / f"{stripe:03d}.lock", "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def save_raw(self, document_id: str, extension: str, data: bytes) -> Path:
         self._doc_dir(document_id).mkdir(parents=True, exist_ok=True)
