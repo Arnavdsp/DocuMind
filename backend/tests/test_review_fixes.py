@@ -15,6 +15,7 @@ from app.rag.chunking import Chunk, chunk_document
 from app.rag.reranker import CrossEncoderReranker
 from app.rag.vector_store import NumpyVectorStore, ScoredChunk
 from app.schemas.documents import ExtractionMethod, ProcessingStage
+from app.schemas.jobs import JobStatus
 from app.services.translation_service import _sentence_aware_chunks
 from app.storage.blob_store import DocumentBlobStore
 from app.utils.errors import DocumentTooLarge
@@ -47,11 +48,17 @@ def test_reupload_during_ingestion_reuses_the_in_flight_job(client):
     first = _upload(client, "sample.txt", read_fixture("sample.txt"), "text/plain")
     document_id = first.json()["document"]["document_id"]
     _wait_until_ready(client, document_id)
-    # pretend ingestion is still running
-    get_repository().update_document_status(document_id, status=ProcessingStage.EMBEDDING)
+    # pretend ingestion is still running: both the document and its job
+    repository = get_repository()
+    repository.update_document_status(document_id, status=ProcessingStage.EMBEDDING)
+    repository.update_job(
+        first.json()["job_id"], status=JobStatus.RUNNING, stage=ProcessingStage.EMBEDDING, progress=0.5
+    )
 
     second = _upload(client, "again.txt", read_fixture("sample.txt"), "text/plain")
     assert second.json()["job_id"] == first.json()["job_id"]
+    job = client.get(f"/api/jobs/{second.json()['job_id']}").json()
+    assert job["status"] == "running"
 
 
 def test_oversized_upload_is_rejected(client, monkeypatch):

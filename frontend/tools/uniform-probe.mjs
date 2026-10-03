@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 const b = await chromium.launch({executablePath: process.env.CHROMIUM_PATH,
   args:["--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"]});
@@ -23,7 +24,7 @@ await p.addInitScript(() => {
 });
 await p.goto("http://127.0.0.1:8000/", { waitUntil: "networkidle" });
 await p.waitForTimeout(3000);
-const doc = process.argv[2] ?? new URL("../../backend/tests/fixtures/sample.txt", import.meta.url).pathname;
+const doc = process.argv[2] ?? fileURLToPath(new URL("../../backend/tests/fixtures/sample.txt", import.meta.url));
 await p.setInputFiles('input[type=file]', doc);
 await p.waitForTimeout(6000);
 const ta = p.locator("#question");
