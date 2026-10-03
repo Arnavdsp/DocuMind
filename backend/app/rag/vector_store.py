@@ -62,6 +62,10 @@ class NumpyVectorStore(VectorStore):
     def add(self, chunks: list[Chunk], embeddings: np.ndarray) -> None:
         if not chunks:
             return
+        if embeddings.shape[0] != len(chunks):
+            raise ValueError(
+                f"{len(chunks)} chunks but {embeddings.shape[0]} embedding rows; they must line up"
+            )
         document_id = chunks[0].document_id
         normalized = _normalize(embeddings)
         self._cache[document_id] = (chunks, normalized)

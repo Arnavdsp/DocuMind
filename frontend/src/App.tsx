@@ -171,17 +171,31 @@ export default function App() {
   );
 
   // --- Actions -------------------------------------------------------------
+  const clearDocumentState = useCallback(() => {
+    // Everything tied to the current document, so nothing from document A
+    // (citation highlight, errors, redshift preview) survives into document B.
+    setDoc(null);
+    setJobId(null);
+    setAnswer(null);
+    setAskError(null);
+    setSelectedCitation(null);
+    setSummary(null);
+    setSummaryError(null);
+    setTranslation(null);
+    setTranslateError(null);
+    setRedshift(0);
+    setPages([]);
+    setPagesError(null);
+    setMissionStart(null);
+    setElapsed(null);
+  }, []);
+
   const handleFile = useCallback(async (file: File) => {
     setUploading(true);
     setUploadError(null);
+    clearDocumentState();
     setUploadName(file.name);
     setUploadSize(file.size);
-    setAnswer(null);
-    setSummary(null);
-    setTranslation(null);
-    setPages([]);
-    setMissionStart(null);
-    setElapsed(null);
     try {
       const res = await api.uploadDocument(file);
       setDoc(res.document);
@@ -193,7 +207,7 @@ export default function App() {
     } finally {
       setUploading(false);
     }
-  }, []);
+  }, [clearDocumentState]);
 
   const handleAsk = useCallback(
     async (question: string) => {
@@ -286,18 +300,11 @@ export default function App() {
   }, []);
 
   const resetMass = useCallback(() => {
-    setDoc(null);
-    setJobId(null);
+    clearDocumentState();
     setUploadName(null);
     setUploadSize(null);
-    setAnswer(null);
-    setSummary(null);
-    setTranslation(null);
-    setPages([]);
-    setMissionStart(null);
-    setElapsed(null);
     setActivePanel("collapse");
-  }, []);
+  }, [clearDocumentState]);
 
   const toggle = useCallback((key: keyof Toggles) => {
     setToggles((t) => ({ ...t, [key]: !t[key] }));
@@ -307,8 +314,8 @@ export default function App() {
     lowerQualityRef.current = handle.lowerQuality;
   }, []);
 
-  const onUnavailable = useCallback(() => {
-    setRenderFailed((prev) => prev ?? "unsupported");
+  const onUnavailable = useCallback((reason: "unsupported" | "context-lost") => {
+    setRenderFailed((prev) => prev ?? reason);
   }, []);
 
   // --- Keyboard: full operation, no exceptions ----------------------------

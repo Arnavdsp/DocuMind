@@ -116,7 +116,17 @@ def extract_pdf(data: bytes, *, settings: Settings) -> ExtractionResult:
 
 def extract_image(data: bytes, *, settings: Settings) -> ExtractionResult:
     try:
-        image = Image.open(io.BytesIO(data))
+        image = Image.open(io.BytesIO(data))  # reads the header only
+    except Exception as exc:
+        raise ExtractionFailed("This image file appears to be corrupted.", internal_detail=str(exc)) from exc
+
+    # Check the declared size before load() decodes the bitmap: a small file can
+    # declare huge dimensions and exhaust memory during decoding.
+    width, height = image.size
+    if width * height > settings.max_image_pixels:
+        raise DocumentTooLarge(f"This image is too large to process ({width}x{height} pixels).")
+
+    try:
         image.load()
     except Exception as exc:
         raise ExtractionFailed("This image file appears to be corrupted.", internal_detail=str(exc)) from exc

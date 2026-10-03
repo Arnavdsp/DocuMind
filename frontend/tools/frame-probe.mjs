@@ -1,7 +1,8 @@
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
-const frag = readFileSync("src/sim/schwarzschild.frag.glsl","utf8");
-const vert = readFileSync("src/sim/schwarzschild.vert.glsl","utf8");
+const root = new URL("../", import.meta.url);
+const frag = readFileSync(new URL("src/sim/schwarzschild.frag.glsl", root),"utf8");
+const vert = readFileSync(new URL("src/sim/schwarzschild.vert.glsl", root),"utf8");
 const W=800,H=450;
 function camera(d,inc,az){const p=[d*Math.cos(inc)*Math.cos(az),d*Math.sin(inc),d*Math.cos(inc)*Math.sin(az)];
  const l=Math.hypot(...p)||1;const f=p.map(v=>v/l);let up=Math.abs(f[1])>0.999?[0,0,1]:[0,1,0];
@@ -12,7 +13,7 @@ const RS = 1.13, OUTER_RS = 9.14;
 const trials = [];
 for (const st of [110,180,300,460]) for (const k of [2.0,2.6,3.2]) trials.push({k,steps:st,distRs:k*OUTER_RS});
 
-const b = await chromium.launch({executablePath:"/opt/pw-browsers/chromium",
+const b = await chromium.launch({executablePath: process.env.CHROMIUM_PATH,
   args:["--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"]});
 const p = await b.newPage({viewport:{width:W,height:H}});
 await p.setContent(`<canvas id=c width=${W} height=${H}></canvas>`);

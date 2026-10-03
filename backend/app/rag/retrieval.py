@@ -51,12 +51,14 @@ def retrieve(
     vector_store: VectorStore,
     reranker: Reranker,
     settings: Settings,
+    top_k: int | None = None,
 ) -> RetrievalResult:
     started = perf_counter()
     query_embedding = model_service.embed([question])[0]
     embedded_at = perf_counter()
 
-    initial = vector_store.search(document_id, query_embedding, top_k=settings.retrieval_top_k)
+    final_k = top_k or settings.rerank_top_k
+    initial = vector_store.search(document_id, query_embedding, top_k=max(settings.retrieval_top_k, final_k))
     searched_at = perf_counter()
 
     if not initial:
@@ -71,7 +73,7 @@ def retrieve(
             rerank_ms=None,
         )
 
-    reranked = reranker.rerank(question, initial, top_k=settings.rerank_top_k)
+    reranked = reranker.rerank(question, initial, top_k=final_k)
     reranked_at = perf_counter()
 
     top_score = reranked[0].score if reranked else 0.0

@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-const b = await chromium.launch({executablePath:"/opt/pw-browsers/chromium",
+const b = await chromium.launch({executablePath: process.env.CHROMIUM_PATH,
   args:["--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"]});
 const p = await b.newPage({viewport:{width:1200,height:700}});
 await p.addInitScript(() => {
@@ -23,7 +23,8 @@ await p.addInitScript(() => {
 });
 await p.goto("http://127.0.0.1:8000/", { waitUntil: "networkidle" });
 await p.waitForTimeout(3000);
-await p.setInputFiles('input[type=file]', "/tmp/annual_report.txt");
+const doc = process.argv[2] ?? new URL("../../backend/tests/fixtures/sample.txt", import.meta.url).pathname;
+await p.setInputFiles('input[type=file]', doc);
 await p.waitForTimeout(6000);
 const ta = p.locator("#question");
 await ta.fill("What was the gross margin?");

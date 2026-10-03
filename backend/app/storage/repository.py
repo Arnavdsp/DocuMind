@@ -211,6 +211,14 @@ class Repository:
                 ),
             )
 
+    def get_latest_job_for_document(self, document_id: str) -> JobRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT job_id FROM jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1",
+                (document_id,),
+            ).fetchone()
+        return self.get_job(row["job_id"]) if row else None
+
     def get_job(self, job_id: str) -> JobRecord | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()

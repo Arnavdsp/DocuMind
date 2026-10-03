@@ -15,12 +15,21 @@ the generator. Two implementations are provided behind one interface:
 
 from __future__ import annotations
 
+import math
 import re
 from abc import ABC, abstractmethod
 
 from app.rag.vector_store import ScoredChunk
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _sigmoid(x: float) -> float:
+    # numerically stable for large |x|
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    z = math.exp(x)
+    return z / (1.0 + z)
 
 
 def _tokenize(text: str) -> set[str]:
@@ -67,7 +76,12 @@ class CrossEncoderReranker(Reranker):
         cross_encoder = self._model_service.get_cross_encoder(self._model_name)
         pairs = [(query, sc.chunk.text) for sc in candidates]
         raw_scores = cross_encoder.predict(pairs)
-        rescored = [ScoredChunk(chunk=sc.chunk, score=float(raw)) for sc, raw in zip(candidates, raw_scores)]
+        # Cross-encoder logits are unbounded, but grounding thresholds are calibrated
+        # for [0, 1] cosine scores. Squash the logit, then blend with the retrieval score.
+        rescored = [
+            ScoredChunk(chunk=sc.chunk, score=0.5 * sc.score + 0.5 * _sigmoid(float(raw)))
+            for sc, raw in zip(candidates, raw_scores)
+        ]
         rescored.sort(key=lambda sc: sc.score, reverse=True)
         return rescored[:top_k]
 

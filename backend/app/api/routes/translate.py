@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/documents", tags=["translate"])
 
 
 @router.post("/{document_id}/translate", response_model=TranslateResponse)
-async def translate(
+def translate(
     document_id: str,
     request: TranslateRequest,
     settings: Settings = Depends(get_settings),

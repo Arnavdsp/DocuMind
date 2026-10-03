@@ -139,7 +139,7 @@ const page_html = `<!doctype html><html><body style="margin:0;background:#000">
 <canvas id="c" width="${W}" height="${H}"></canvas></body></html>`;
 
 const browser = await chromium.launch({
-  executablePath: "/opt/pw-browsers/chromium",
+  executablePath: process.env.CHROMIUM_PATH,
   args: [
     "--use-gl=angle",
     "--use-angle=swiftshader",

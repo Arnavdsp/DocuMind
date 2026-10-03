@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/documents", tags=["qa"])
 
 
 @router.post("/{document_id}/ask", response_model=AskResponse)
-async def ask_document(
+def ask_document(
     document_id: str,
     request: AskRequest,
     settings: Settings = Depends(get_settings),
@@ -45,6 +45,7 @@ async def ask_document(
         vector_store=vector_store,
         reranker=reranker,
         settings=settings,
+        top_k=request.top_k,
     )
     retrieved_at = perf_counter()
 

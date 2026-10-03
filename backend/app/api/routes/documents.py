@@ -15,11 +15,12 @@ from app.schemas.documents import (
     DocumentUploadResponse,
     ProcessingStage,
 )
+from app.schemas.jobs import JobStatus
 from app.services.ingestion_pipeline import run_ingestion
 from app.services.model_service import ModelService, get_model_service
 from app.storage.blob_store import DocumentBlobStore, compute_document_id
 from app.storage.repository import Repository
-from app.utils.errors import DocumentNotFound
+from app.utils.errors import DocumentNotFound, FileTooLarge
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -34,7 +35,13 @@ async def upload_document(
     vector_store: VectorStore = Depends(get_vector_store),
     model_service: ModelService = Depends(get_model_service),
 ) -> DocumentUploadResponse:
-    raw_bytes = await file.read()
+    # Read in bounded chunks so an oversized body is rejected before it is all in memory.
+    buf = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        buf.extend(chunk)
+        if len(buf) > settings.max_upload_bytes:
+            raise FileTooLarge(f"Files must be under {settings.max_upload_bytes // (1024 * 1024)} MB.")
+    raw_bytes = bytes(buf)
     validated = validate_upload(
         filename=file.filename or "upload",
         declared_content_type=file.content_type,
@@ -44,12 +51,22 @@ async def upload_document(
 
     document_id = compute_document_id(raw_bytes)
 
-    # Content-addressed cache hit: identical bytes were already ingested.
+    # Content-addressed cache hit: identical bytes were already uploaded.
     existing = repository.get_document(document_id)
     if existing and existing.status == ProcessingStage.READY:
+        # Nothing to ingest, so the job is finished as soon as it exists; a pending
+        # job here would leave the client polling forever.
         job = repository.create_job(job_id=str(uuid.uuid4()), document_id=document_id)
-        repository.update_job(job.job_id, status=repository.get_job(job.job_id).status)  # no-op touch
+        repository.update_job(
+            job.job_id, status=JobStatus.SUCCEEDED, stage=ProcessingStage.READY, progress=1.0
+        )
         return DocumentUploadResponse(document=existing, job_id=job.job_id)
+    if existing and existing.status != ProcessingStage.FAILED:
+        # Still ingesting: hand back the in-flight job instead of starting a second
+        # ingestion that would reset the document and race on its blob and index.
+        in_flight = repository.get_latest_job_for_document(document_id)
+        if in_flight is not None:
+            return DocumentUploadResponse(document=existing, job_id=in_flight.job_id)
 
     blob_store.save_raw(document_id, validated.extension, raw_bytes)
     document = repository.create_document(
