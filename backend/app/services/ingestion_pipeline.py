@@ -30,6 +30,10 @@ def _word_count(pages) -> int:
     return sum(len(p.text.split()) for p in pages)
 
 
+def _superseded(document_id: str, job_id: str) -> None:
+    log_event(logger, "ingestion_superseded", document_id=document_id, job_id=job_id)
+
+
 def run_ingestion(
     *,
     document_id: str,
@@ -44,7 +48,7 @@ def run_ingestion(
 ) -> None:
     try:
         repository.update_job(
-            job_id, status=JobStatus.RUNNING, stage=ProcessingStage.EXTRACTING, progress=0.1
+            job_id, status=JobStatus.RUNNING, stage=ProcessingStage.EXTRACTING, progress=0.1, if_active=True
         )
         result = extract(extension=extension, data=raw_bytes, settings=settings)
 
@@ -53,6 +57,7 @@ def run_ingestion(
                 document_id,
                 status=ProcessingStage.FAILED,
                 error_message="No text could be extracted from this document.",
+                job_id=job_id,
             )
             repository.update_job(
                 job_id,
@@ -60,11 +65,14 @@ def run_ingestion(
                 stage=ProcessingStage.FAILED,
                 progress=1.0,
                 error_message="No extractable text.",
+                if_active=True,
             )
             return
 
+        if not repository.owns_document(job_id, document_id):
+            return _superseded(document_id, job_id)
         blob_store.save_pages(document_id, result.pages)
-        repository.update_job(job_id, stage=ProcessingStage.CHUNKING, progress=0.4)
+        repository.update_job(job_id, stage=ProcessingStage.CHUNKING, progress=0.4, if_active=True)
 
         chunks = chunk_document(
             result.pages,
@@ -73,10 +81,12 @@ def run_ingestion(
             overlap_tokens=settings.chunk_overlap_tokens,
         )
 
-        repository.update_job(job_id, stage=ProcessingStage.EMBEDDING, progress=0.6)
+        repository.update_job(job_id, stage=ProcessingStage.EMBEDDING, progress=0.6, if_active=True)
         if chunks:
             embeddings = model_service.embed([c.text for c in chunks])
-            repository.update_job(job_id, stage=ProcessingStage.INDEXING, progress=0.85)
+            repository.update_job(job_id, stage=ProcessingStage.INDEXING, progress=0.85, if_active=True)
+            if not repository.owns_document(job_id, document_id):
+                return _superseded(document_id, job_id)
             vector_store.add(chunks, embeddings)
 
         page_infos = [
@@ -96,7 +106,7 @@ def run_ingestion(
             estimated_reading_minutes=max(1, round(_word_count(result.pages) / 200)),
         )
 
-        repository.update_document_status(
+        finished = repository.update_document_status(
             document_id,
             status=ProcessingStage.READY,
             metrics=metrics,
@@ -104,8 +114,18 @@ def run_ingestion(
             # The count the index actually holds, not an estimate derived from
             # character length. This is what lets the UI drop its "~" prefix.
             chunk_count=len(chunks),
+            job_id=job_id,
         )
-        repository.update_job(job_id, status=JobStatus.SUCCEEDED, stage=ProcessingStage.READY, progress=1.0)
+        if not finished:
+            # Deleted or replaced while we were indexing. If the document is gone,
+            # remove what we just wrote; a replacement writes its own copy.
+            if repository.get_document(document_id) is None:
+                blob_store.delete(document_id)
+                vector_store.delete(document_id)
+            return _superseded(document_id, job_id)
+        repository.update_job(
+            job_id, status=JobStatus.SUCCEEDED, stage=ProcessingStage.READY, progress=1.0, if_active=True
+        )
         log_event(
             logger,
             "ingestion_succeeded",
@@ -117,7 +137,7 @@ def run_ingestion(
     except AppError as exc:
         log_event(logger, "ingestion_failed", level=40, document_id=document_id, error=str(exc))
         repository.update_document_status(
-            document_id, status=ProcessingStage.FAILED, error_message=exc.user_message
+            document_id, status=ProcessingStage.FAILED, error_message=exc.user_message, job_id=job_id
         )
         repository.update_job(
             job_id,
@@ -125,11 +145,19 @@ def run_ingestion(
             stage=ProcessingStage.FAILED,
             progress=1.0,
             error_message=exc.user_message,
+            if_active=True,
         )
     except Exception as exc:  # never let an unexpected error strand a job as "running" forever
         log_event(logger, "ingestion_unexpected_error", level=50, document_id=document_id, error=str(exc))
         message = "The document could not be processed. Try a smaller file or retry."
-        repository.update_document_status(document_id, status=ProcessingStage.FAILED, error_message=message)
+        repository.update_document_status(
+            document_id, status=ProcessingStage.FAILED, error_message=message, job_id=job_id
+        )
         repository.update_job(
-            job_id, status=JobStatus.FAILED, stage=ProcessingStage.FAILED, progress=1.0, error_message=message
+            job_id,
+            status=JobStatus.FAILED,
+            stage=ProcessingStage.FAILED,
+            progress=1.0,
+            error_message=message,
+            if_active=True,
         )

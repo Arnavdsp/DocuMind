@@ -4,8 +4,12 @@ These are not tests you run in CI; they are instruments for looking at a
 renderer that is otherwise very easy to be wrong about. Each one caught a real
 defect during the build.
 
-Run them from `frontend/`, with `playwright` installed (`npm i -D playwright`).
+Run them from `frontend/`, with `playwright` installed (`npm i -D playwright`,
+then `npx playwright install chromium`). They use Playwright's own Chromium; set
+`CHROMIUM_PATH` to point at a different binary.
 `ui-check.mjs` and `uniform-probe.mjs` need the API running on :8000.
+`uniform-probe.mjs` uploads the file given as its first argument, or
+`backend/tests/fixtures/sample.txt` if none is given.
 
 | Tool | What it answers |
 |---|---|
@@ -18,5 +22,5 @@ Run them from `frontend/`, with `playwright` installed (`npm i -D playwright`).
 node tools/render-check.mjs
 node tools/frame-probe.mjs
 node tools/ui-check.mjs /path/to/document.txt mytag
-node tools/uniform-probe.mjs
+node tools/uniform-probe.mjs [/path/to/document.txt]
 ```

@@ -12,7 +12,7 @@ interface Props {
   onTelemetry: (t: Telemetry) => void;
   /** Called when WebGL is unavailable or the context is lost — the shell
    *  swaps in StaticFallback and shows SIGNAL LOST / REINITIALISE. */
-  onUnavailable: () => void;
+  onUnavailable: (reason: "unsupported" | "context-lost") => void;
   /** Registers the LOWER QUALITY action with the shell. */
   onReady: (api: { lowerQuality: () => void }) => void;
 }
@@ -55,13 +55,13 @@ export function GargantuaCanvas({
       (t) => telemetryRef.current(t),
       () => {
         setFailed(true);
-        unavailableRef.current();
+        unavailableRef.current("context-lost");
       }
     );
 
     if (!renderer.init()) {
       setFailed(true);
-      unavailableRef.current();
+      unavailableRef.current("unsupported");
       return;
     }
 

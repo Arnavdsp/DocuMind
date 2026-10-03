@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import Protocol
@@ -83,6 +84,8 @@ class HFModelService(ModelService):
         self._qa_model = None
         self._gen_tokenizer = None
         self._gen_model = None
+        self._gen_pipeline = None
+        self._gen_lock = threading.Lock()
         self._cross_encoders: dict[str, object] = {}
         self._device = None
 
@@ -241,8 +244,13 @@ class HFModelService(ModelService):
         try:
             from transformers import pipeline
 
-            tokenizer, model = self._load_generation_model()
-            pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+            # Two requests can both reach the first generate() call; without the
+            # lock each would load its own copy of the model.
+            with self._gen_lock:
+                if self._gen_pipeline is None:
+                    tokenizer, model = self._load_generation_model()
+                    self._gen_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
+            pipe = self._gen_pipeline
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -260,9 +268,12 @@ class HFModelService(ModelService):
 
     def get_cross_encoder(self, model_name: str):
         if model_name not in self._cross_encoders:
-            from sentence_transformers import CrossEncoder
+            try:
+                from sentence_transformers import CrossEncoder
 
-            self._cross_encoders[model_name] = CrossEncoder(model_name, device=self._detect_device())
+                self._cross_encoders[model_name] = CrossEncoder(model_name, device=self._detect_device())
+            except Exception as exc:
+                raise ModelUnavailable(internal_detail=str(exc)) from exc
         return self._cross_encoders[model_name]
 
 

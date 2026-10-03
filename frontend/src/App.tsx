@@ -132,9 +132,12 @@ export default function App() {
   useEffect(() => {
     if (!jobDocumentId) return;
     if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
+    const gen = docGeneration.current;
     api
       .getDocument(jobDocumentId)
-      .then(setDoc)
+      .then((d) => {
+        if (gen === docGeneration.current) setDoc(d);
+      })
       .catch(() => {
         /* the collapse panel already surfaces the job's own failure */
       });
@@ -171,43 +174,73 @@ export default function App() {
   );
 
   // --- Actions -------------------------------------------------------------
+  /* Bumped whenever the current document is cleared. Requests capture it
+     when they start and drop their result if it has changed, so a slow
+     answer or summary for document A can't land after a reset or upload. */
+  const docGeneration = useRef(0);
+
+  const clearDocumentState = useCallback(() => {
+    // Everything tied to the current document, so nothing from document A
+    // (citation highlight, errors, redshift preview) survives into document B.
+    docGeneration.current += 1;
+    setDoc(null);
+    setJobId(null);
+    setAnswer(null);
+    setAskError(null);
+    setSelectedCitation(null);
+    setSummary(null);
+    setSummaryError(null);
+    setTranslation(null);
+    setTranslateError(null);
+    setRedshift(0);
+    setPages([]);
+    setPagesError(null);
+    setAsking(false);
+    setSummaryPending(false);
+    setTranslatePending(false);
+    setPagesPending(false);
+    setMissionStart(null);
+    setElapsed(null);
+  }, []);
+
   const handleFile = useCallback(async (file: File) => {
     setUploading(true);
     setUploadError(null);
+    clearDocumentState();
+    const gen = docGeneration.current;
     setUploadName(file.name);
     setUploadSize(file.size);
-    setAnswer(null);
-    setSummary(null);
-    setTranslation(null);
-    setPages([]);
-    setMissionStart(null);
-    setElapsed(null);
     try {
       const res = await api.uploadDocument(file);
+      // reset while the upload was in flight: don't bring the document back
+      if (gen !== docGeneration.current) return;
       setDoc(res.document);
       setJobId(res.job_id);
       setActivePanel("collapse");
     } catch (err) {
+      if (gen !== docGeneration.current) return;
       setUploadError(messageOf(err));
       setUploadName(null);
     } finally {
       setUploading(false);
     }
-  }, []);
+  }, [clearDocumentState]);
 
   const handleAsk = useCallback(
     async (question: string) => {
       if (!doc) return;
+      const gen = docGeneration.current;
       setAsking(true);
       setAskError(null);
       setSelectedCitation(null);
       setTraceProgress(0);
       try {
-        setAnswer(await api.ask(doc.document_id, question, answer?.conversation_id));
+        const res = await api.ask(doc.document_id, question, answer?.conversation_id);
+        if (gen === docGeneration.current) setAnswer(res);
       } catch (err) {
-        setAskError(messageOf(err));
+        if (gen === docGeneration.current) setAskError(messageOf(err));
       } finally {
-        setAsking(false);
+        if (gen === docGeneration.current) setAsking(false);
       }
     },
     [doc, answer?.conversation_id]
@@ -240,14 +273,16 @@ export default function App() {
   const handleSummarize = useCallback(
     async (force: boolean) => {
       if (!doc) return;
+      const gen = docGeneration.current;
       setSummaryPending(true);
       setSummaryError(null);
       try {
-        setSummary(await api.summarize(doc.document_id, force));
+        const res = await api.summarize(doc.document_id, force);
+        if (gen === docGeneration.current) setSummary(res);
       } catch (err) {
-        setSummaryError(messageOf(err));
+        if (gen === docGeneration.current) setSummaryError(messageOf(err));
       } finally {
-        setSummaryPending(false);
+        if (gen === docGeneration.current) setSummaryPending(false);
       }
     },
     [doc]
@@ -256,14 +291,16 @@ export default function App() {
   const handleTranslate = useCallback(
     async (target: string) => {
       if (!doc) return;
+      const gen = docGeneration.current;
       setTranslatePending(true);
       setTranslateError(null);
       try {
-        setTranslation(await api.translate(doc.document_id, target));
+        const res = await api.translate(doc.document_id, target);
+        if (gen === docGeneration.current) setTranslation(res);
       } catch (err) {
-        setTranslateError(messageOf(err));
+        if (gen === docGeneration.current) setTranslateError(messageOf(err));
       } finally {
-        setTranslatePending(false);
+        if (gen === docGeneration.current) setTranslatePending(false);
       }
     },
     [doc]
@@ -271,13 +308,20 @@ export default function App() {
 
   useEffect(() => {
     if (activePanel !== "integrity" || !doc || pages.length > 0) return;
+    const gen = docGeneration.current;
     setPagesPending(true);
     setPagesError(null);
     api
       .getDocumentPages(doc.document_id)
-      .then((r) => setPages(r.pages))
-      .catch((err) => setPagesError(messageOf(err)))
-      .finally(() => setPagesPending(false));
+      .then((r) => {
+        if (gen === docGeneration.current) setPages(r.pages);
+      })
+      .catch((err) => {
+        if (gen === docGeneration.current) setPagesError(messageOf(err));
+      })
+      .finally(() => {
+        if (gen === docGeneration.current) setPagesPending(false);
+      });
   }, [activePanel, doc, pages.length]);
 
   const reinitialise = useCallback(() => {
@@ -286,18 +330,11 @@ export default function App() {
   }, []);
 
   const resetMass = useCallback(() => {
-    setDoc(null);
-    setJobId(null);
+    clearDocumentState();
     setUploadName(null);
     setUploadSize(null);
-    setAnswer(null);
-    setSummary(null);
-    setTranslation(null);
-    setPages([]);
-    setMissionStart(null);
-    setElapsed(null);
     setActivePanel("collapse");
-  }, []);
+  }, [clearDocumentState]);
 
   const toggle = useCallback((key: keyof Toggles) => {
     setToggles((t) => ({ ...t, [key]: !t[key] }));
@@ -307,8 +344,8 @@ export default function App() {
     lowerQualityRef.current = handle.lowerQuality;
   }, []);
 
-  const onUnavailable = useCallback(() => {
-    setRenderFailed((prev) => prev ?? "unsupported");
+  const onUnavailable = useCallback((reason: "unsupported" | "context-lost") => {
+    setRenderFailed((prev) => prev ?? reason);
   }, []);
 
   // --- Keyboard: full operation, no exceptions ----------------------------

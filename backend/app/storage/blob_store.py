@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from app.ingestion.extractors import ExtractedPage
 from app.schemas.documents import ExtractionMethod
+
+_DOCUMENT_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
 def compute_document_id(data: bytes) -> str:
@@ -25,11 +28,14 @@ class DocumentBlobStore:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def _doc_dir(self, document_id: str) -> Path:
-        d = self._root / document_id
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        # IDs come from compute_document_id; anything else (e.g. "../x") must not
+        # reach the filesystem.
+        if not _DOCUMENT_ID_RE.fullmatch(document_id):
+            raise ValueError("invalid document_id")
+        return self._root / document_id
 
     def save_raw(self, document_id: str, extension: str, data: bytes) -> Path:
+        self._doc_dir(document_id).mkdir(parents=True, exist_ok=True)
         path = self._doc_dir(document_id) / f"original{extension}"
         path.write_bytes(data)
         return path
@@ -51,6 +57,7 @@ class DocumentBlobStore:
             }
             for p in pages
         ]
+        self._doc_dir(document_id).mkdir(parents=True, exist_ok=True)
         (self._doc_dir(document_id) / "pages.json").write_text(json.dumps(payload))
 
     def load_pages(self, document_id: str) -> list[ExtractedPage]:

@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/documents", tags=["summarize"])
 
 
 @router.post("/{document_id}/summarize", response_model=SummarizeResponse)
-async def summarize(
+def summarize(
     document_id: str,
     request: SummarizeRequest,
     settings: Settings = Depends(get_settings),

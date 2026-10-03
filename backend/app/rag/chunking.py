@@ -39,6 +39,20 @@ def _split_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
+def _sentence_spans(text: str) -> list[tuple[str, int, int]]:
+    """Sentences with their (start, end) offsets in the original, unstripped text."""
+    spans: list[tuple[str, int, int]] = []
+    pos = 0
+    for sentence in _split_sentences(text):
+        start = text.find(sentence, pos)
+        if start < 0:  # cannot happen for substrings in order; keep offsets monotonic anyway
+            start = pos
+        end = start + len(sentence)
+        spans.append((sentence, start, end))
+        pos = end
+    return spans
+
+
 def _estimate_tokens(text: str) -> int:
     # A word roughly maps to ~1.3 tokens for common English tokenizers;
     # this is only used for chunk-size budgeting, not billing or truncation.
@@ -53,21 +67,17 @@ def chunk_page(
     overlap_tokens: int,
     section: str | None = None,
 ) -> list[Chunk]:
-    sentences = _split_sentences(page.text)
-    if not sentences:
+    spans = _sentence_spans(page.text)
+    if not spans:
         return []
 
     chunks: list[Chunk] = []
-    current: list[str] = []
+    current: list[tuple[str, int, int]] = []
     current_tokens = 0
-    cursor = 0  # offset within page.text
 
-    def flush(end_cursor: int) -> None:
-        nonlocal current, current_tokens
+    def flush() -> None:
         if not current:
             return
-        chunk_text = " ".join(current)
-        start = end_cursor - len(chunk_text)
         chunk_id = f"{document_id}:p{page.page_number}:{len(chunks)}"
         chunks.append(
             Chunk(
@@ -75,24 +85,24 @@ def chunk_page(
                 chunk_id=chunk_id,
                 page_number=page.page_number,
                 section=section,
-                text=chunk_text,
-                start_offset=max(start, 0),
-                end_offset=end_cursor,
+                text=" ".join(s for s, _, _ in current),
+                # offsets index into page.text, so a citation can slice the original span
+                start_offset=current[0][1],
+                end_offset=current[-1][2],
                 token_estimate=current_tokens,
             )
         )
 
-    for sentence in sentences:
-        sentence_tokens = _estimate_tokens(sentence)
-        cursor += len(sentence) + 1
+    for span in spans:
+        sentence_tokens = _estimate_tokens(span[0])
 
         if current and current_tokens + sentence_tokens > target_tokens:
-            flush(cursor - len(sentence) - 1)
+            flush()
             # keep the tail of the previous chunk for overlap continuity
-            overlap: list[str] = []
+            overlap: list[tuple[str, int, int]] = []
             overlap_count = 0
             for prev in reversed(current):
-                t = _estimate_tokens(prev)
+                t = _estimate_tokens(prev[0])
                 if overlap_count + t > overlap_tokens:
                     break
                 overlap.insert(0, prev)
@@ -100,10 +110,10 @@ def chunk_page(
             current = overlap
             current_tokens = overlap_count
 
-        current.append(sentence)
+        current.append(span)
         current_tokens += sentence_tokens
 
-    flush(cursor)
+    flush()
     return chunks
 
 
@@ -114,6 +124,12 @@ def chunk_document(
     target_tokens: int,
     overlap_tokens: int,
 ) -> list[Chunk]:
+    if target_tokens <= 0:
+        raise ValueError(f"target_tokens must be positive, got {target_tokens}")
+    if not 0 <= overlap_tokens < target_tokens:
+        raise ValueError(
+            f"overlap_tokens must be in [0, target_tokens), got {overlap_tokens} with target {target_tokens}"
+        )
     all_chunks: list[Chunk] = []
     for page in pages:
         all_chunks.extend(

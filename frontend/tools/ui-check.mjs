@@ -2,7 +2,7 @@ import { chromium } from "playwright";
 const FILE = process.argv[2] || "/tmp/ops.txt";
 const TAG  = process.argv[3] || "ui";
 const b = await chromium.launch({
-  executablePath: "/opt/pw-browsers/chromium",
+  executablePath: process.env.CHROMIUM_PATH,
   args: ["--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader","--ignore-gpu-blocklist"],
 });
 const p = await b.newPage({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });

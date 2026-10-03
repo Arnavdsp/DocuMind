@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile
 from fastapi import File as FastAPIFile
 
@@ -15,11 +13,12 @@ from app.schemas.documents import (
     DocumentUploadResponse,
     ProcessingStage,
 )
+from app.schemas.jobs import JobStatus
 from app.services.ingestion_pipeline import run_ingestion
 from app.services.model_service import ModelService, get_model_service
 from app.storage.blob_store import DocumentBlobStore, compute_document_id
 from app.storage.repository import Repository
-from app.utils.errors import DocumentNotFound
+from app.utils.errors import DocumentNotFound, FileTooLarge
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -34,7 +33,13 @@ async def upload_document(
     vector_store: VectorStore = Depends(get_vector_store),
     model_service: ModelService = Depends(get_model_service),
 ) -> DocumentUploadResponse:
-    raw_bytes = await file.read()
+    # Read in bounded chunks so an oversized body is rejected before it is all in memory.
+    buf = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        buf.extend(chunk)
+        if len(buf) > settings.max_upload_bytes:
+            raise FileTooLarge(f"Files must be under {settings.max_upload_bytes // (1024 * 1024)} MB.")
+    raw_bytes = bytes(buf)
     validated = validate_upload(
         filename=file.filename or "upload",
         declared_content_type=file.content_type,
@@ -44,21 +49,27 @@ async def upload_document(
 
     document_id = compute_document_id(raw_bytes)
 
-    # Content-addressed cache hit: identical bytes were already ingested.
-    existing = repository.get_document(document_id)
-    if existing and existing.status == ProcessingStage.READY:
-        job = repository.create_job(job_id=str(uuid.uuid4()), document_id=document_id)
-        repository.update_job(job.job_id, status=repository.get_job(job.job_id).status)  # no-op touch
-        return DocumentUploadResponse(document=existing, job_id=job.job_id)
-
-    blob_store.save_raw(document_id, validated.extension, raw_bytes)
-    document = repository.create_document(
+    # Content-addressed: identical bytes map to the same document. The claim is
+    # atomic, so a re-upload (even a concurrent one) gets the existing job back
+    # instead of starting a second ingestion that would race on the blob and index.
+    job, created = repository.claim_upload(
         document_id=document_id,
         filename=validated.safe_filename,
         content_type=validated.content_type,
         size_bytes=validated.size_bytes,
     )
-    job = repository.create_job(job_id=str(uuid.uuid4()), document_id=document_id)
+    document = repository.get_document(document_id)
+    if not created:
+        return DocumentUploadResponse(document=document, job_id=job.job_id)
+
+    try:
+        blob_store.save_raw(document_id, validated.extension, raw_bytes)
+    except Exception:
+        # Without this the claimed job would stay pending and every re-upload
+        # would be handed back a job that never runs.
+        repository.update_document_status(document_id, status=ProcessingStage.FAILED)
+        repository.update_job(job.job_id, status=JobStatus.FAILED, stage=ProcessingStage.FAILED)
+        raise
 
     background_tasks.add_task(
         run_ingestion,

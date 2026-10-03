@@ -67,8 +67,25 @@ def detect_language_offline(text: str) -> str | None:
         return None
 
 
+def _split_oversized(sentence: str, max_chars: int) -> list[str]:
+    """Break one over-long "sentence" (OCR output, tables) at whitespace, or hard-cut it."""
+    pieces: list[str] = []
+    rest = sentence
+    while len(rest) > max_chars:
+        cut = rest.rfind(" ", 0, max_chars + 1)
+        if cut <= 0:
+            cut = max_chars
+        pieces.append(rest[:cut].strip())
+        rest = rest[cut:].strip()
+    if rest:
+        pieces.append(rest)
+    return [p for p in pieces if p]
+
+
 def _sentence_aware_chunks(text: str, max_chars: int) -> list[str]:
-    sentences = _SENTENCE_SPLIT_RE.split(text)
+    sentences: list[str] = []
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        sentences.extend(_split_oversized(sentence, max_chars) if len(sentence) > max_chars else [sentence])
     chunks: list[str] = []
     current = ""
     for sentence in sentences:
