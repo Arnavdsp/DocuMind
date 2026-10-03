@@ -181,6 +181,67 @@ def test_job_owned_by_another_host_is_reused(tmp_path):
     assert second.job_id == first.job_id
 
 
+def test_malformed_owner_counts_as_alive(tmp_path):
+    _, first, second, created = _claim_with_owner(tmp_path, "not-an-owner")
+    assert not created
+    assert second.job_id == first.job_id
+
+
+def test_delete_ends_the_running_job_and_fences_its_writes(tmp_path):
+    from app.storage.repository import Repository
+
+    repository = Repository(tmp_path / "meta.db")
+    kwargs = dict(document_id="e" * 32, filename="e.txt", content_type="text/plain", size_bytes=1)
+    old, _ = repository.claim_upload(**kwargs)
+    assert repository.owns_document(old.job_id, kwargs["document_id"])
+
+    repository.delete_document(kwargs["document_id"])
+    assert repository.get_job(old.job_id).status == JobStatus.FAILED
+    assert not repository.owns_document(old.job_id, kwargs["document_id"])
+
+    # the same file is uploaded again; the old worker must not touch the new row
+    new, created = repository.claim_upload(**kwargs)
+    assert created
+    assert not repository.update_document_status(
+        kwargs["document_id"], status=ProcessingStage.READY, job_id=old.job_id
+    )
+    assert repository.get_document(kwargs["document_id"]).status == ProcessingStage.UPLOADING
+    assert repository.update_document_status(
+        kwargs["document_id"], status=ProcessingStage.EMBEDDING, job_id=new.job_id
+    )
+
+
+def test_ingestion_for_a_deleted_document_writes_nothing(temp_data_dir):
+    from app.dependencies import get_blob_store, get_repository, get_vector_store
+    from app.services.ingestion_pipeline import run_ingestion
+    from app.services.model_service import get_model_service
+
+    repository, blob_store, vector_store = get_repository(), get_blob_store(), get_vector_store()
+    raw = read_fixture("sample.txt")
+    document_id = "f" * 32
+    job, _ = repository.claim_upload(
+        document_id=document_id, filename="s.txt", content_type="text/plain", size_bytes=len(raw)
+    )
+    repository.delete_document(document_id)
+
+    run_ingestion(
+        document_id=document_id,
+        job_id=job.job_id,
+        extension="txt",
+        raw_bytes=raw,
+        repository=repository,
+        blob_store=blob_store,
+        vector_store=vector_store,
+        model_service=get_model_service(),
+        settings=get_settings(),
+    )
+
+    assert blob_store.load_pages(document_id) == []
+    assert not vector_store.exists(document_id)
+    assert repository.get_document(document_id) is None
+    assert repository.get_job(job.job_id).status == JobStatus.FAILED
+
+
 def test_oversized_upload_is_rejected(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "max_upload_bytes", 10)

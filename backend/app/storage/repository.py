@@ -63,6 +63,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+_ACTIVE = (JobStatus.PENDING.value, JobStatus.RUNNING.value)
+
+# True while job ? is still pending/running and is the newest job for document ?.
+# A delete or a replacement upload ends that, and the worker must stop writing.
+_OWNS_DOCUMENT = (
+    "EXISTS (SELECT 1 FROM jobs j WHERE j.job_id = ? AND j.status IN (?, ?) "
+    "AND j.job_id = (SELECT job_id FROM jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1))"
+)
+
+
 # Ingestion runs as a background task inside the process that accepted the upload,
 # so a job dies with that process. Each job records which process owns it.
 _PROCESS_TOKEN = uuid.uuid4().hex
@@ -80,15 +90,19 @@ def _owner_is_gone(owner: str | None) -> bool:
     """
     if not owner:
         return False
-    host, pid, token = owner.rsplit(":", 2)
+    try:
+        host, pid_text, token = owner.rsplit(":", 2)
+        pid = int(pid_text)
+    except ValueError:
+        return False  # not something we wrote; can't check it, so treat it as alive
     if host != socket.gethostname():
         return False
-    if int(pid) == os.getpid():
+    if pid == os.getpid():
         # Same pid but a different token: this process was restarted and reused
         # the pid, which is the usual case in a container where the server is pid 1.
         return token != _PROCESS_TOKEN
     try:
-        os.kill(int(pid), 0)
+        os.kill(pid, 0)
     except ProcessLookupError:
         return True
     except PermissionError:
@@ -157,14 +171,19 @@ class Repository:
         pages: list[PageInfo] | None = None,
         error_message: str | None = None,
         chunk_count: int | None = None,
-    ) -> None:
+        job_id: str | None = None,
+    ) -> bool:
+        """Returns False if nothing was updated. With job_id, the update only
+        applies while that job still owns the document (see _OWNS_DOCUMENT)."""
+        fence = f" AND {_OWNS_DOCUMENT}" if job_id else ""
+        fence_args = (job_id, *_ACTIVE, document_id) if job_id else ()
         with self._lock, self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE documents SET status = ?, updated_at = ?, "
                 "metrics_json = COALESCE(?, metrics_json), "
                 "pages_json = COALESCE(?, pages_json), "
                 "chunk_count = COALESCE(?, chunk_count), "
-                "error_message = ? WHERE document_id = ?",
+                "error_message = ? WHERE document_id = ?" + fence,
                 (
                     status.value,
                     _now(),
@@ -173,8 +192,10 @@ class Repository:
                     chunk_count,
                     error_message,
                     document_id,
+                    *fence_args,
                 ),
             )
+        return cur.rowcount > 0
 
     def get_document(self, document_id: str) -> DocumentRecord | None:
         with self._connect() as conn:
@@ -188,6 +209,20 @@ class Repository:
 
     def delete_document(self, document_id: str) -> None:
         with self._lock, self._connect() as conn:
+            # End any ingestion still running for it, so the worker stops before
+            # writing pages, vectors or status for a document that is gone.
+            conn.execute(
+                "UPDATE jobs SET status = ?, stage = ?, error_message = ?, updated_at = ? "
+                "WHERE document_id = ? AND status IN (?, ?)",
+                (
+                    JobStatus.FAILED.value,
+                    ProcessingStage.FAILED.value,
+                    "The document was deleted.",
+                    _now(),
+                    document_id,
+                    *_ACTIVE,
+                ),
+            )
             conn.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
             conn.execute("DELETE FROM summaries WHERE document_id = ?", (document_id,))
 
@@ -236,14 +271,18 @@ class Repository:
         stage: ProcessingStage | None = None,
         progress: float | None = None,
         error_message: str | None = None,
+        if_active: bool = False,
     ) -> None:
+        """With if_active, a job that has already ended (failed by a delete or a
+        replacement upload) is left as it is."""
         current = self.get_job(job_id)
         if current is None:
             return
+        fence = " AND status IN (?, ?)" if if_active else ""
         with self._lock, self._connect() as conn:
             conn.execute(
                 "UPDATE jobs SET status = ?, stage = ?, progress = ?, updated_at = ?, error_message = ? "
-                "WHERE job_id = ?",
+                "WHERE job_id = ?" + fence,
                 (
                     (status or current.status).value,
                     (stage or current.stage).value,
@@ -251,8 +290,14 @@ class Repository:
                     _now(),
                     error_message,
                     job_id,
+                    *(_ACTIVE if if_active else ()),
                 ),
             )
+
+    def owns_document(self, job_id: str, document_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(f"SELECT {_OWNS_DOCUMENT}", (job_id, *_ACTIVE, document_id)).fetchone()
+        return bool(row[0])
 
     def claim_upload(
         self, *, document_id: str, filename: str, content_type: str, size_bytes: int
