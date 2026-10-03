@@ -278,17 +278,15 @@ class Repository:
                 "ORDER BY created_at DESC LIMIT 1",
                 (document_id,),
             ).fetchone()
+            latest_active = latest is not None and JobStatus(latest["status"]) in (
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            )
             in_flight = (
                 status not in (None, ProcessingStage.READY, ProcessingStage.FAILED)
-                and latest is not None
-                and JobStatus(latest["status"]) in (JobStatus.PENDING, JobStatus.RUNNING)
+                and latest_active
+                and not _owner_is_gone(latest["owner"])
             )
-            if in_flight and _owner_is_gone(latest["owner"]):
-                conn.execute(
-                    "UPDATE jobs SET status = ?, error_message = ?, updated_at = ? WHERE job_id = ?",
-                    (JobStatus.FAILED.value, "Ingestion stopped: its worker exited.", now, latest["job_id"]),
-                )
-                in_flight = False
 
             if status == ProcessingStage.READY:
                 job_values = (JobStatus.SUCCEEDED, ProcessingStage.READY, 1.0)
@@ -296,6 +294,21 @@ class Repository:
                 job_id = latest["job_id"]
                 job_values = None
             else:
+                if latest_active:
+                    # Replacing a job that still reads as active (its worker exited, or
+                    # died between failing the document and failing the job): end it, so
+                    # a client still polling it stops waiting.
+                    conn.execute(
+                        "UPDATE jobs SET status = ?, stage = ?, error_message = ?, updated_at = ? "
+                        "WHERE job_id = ?",
+                        (
+                            JobStatus.FAILED.value,
+                            ProcessingStage.FAILED.value,
+                            "Ingestion stopped before finishing.",
+                            now,
+                            latest["job_id"],
+                        ),
+                    )
                 conn.execute(
                     "INSERT OR REPLACE INTO documents "
                     "(document_id, filename, content_type, size_bytes, status, created_at, updated_at) "

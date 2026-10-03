@@ -101,6 +101,22 @@ def test_failed_document_is_claimed_again(tmp_path):
     assert second.job_id != first.job_id
 
 
+def test_active_job_of_a_failed_document_is_ended_when_replaced(tmp_path):
+    from app.storage.repository import Repository
+
+    repository = Repository(tmp_path / "meta.db")
+    kwargs = dict(document_id="d" * 32, filename="d.txt", content_type="text/plain", size_bytes=1)
+    first, _ = repository.claim_upload(**kwargs)
+    # the worker failed the document, then exited before failing its job
+    repository.update_job(first.job_id, status=JobStatus.RUNNING)
+    repository.update_document_status(kwargs["document_id"], status=ProcessingStage.FAILED)
+
+    second, created = repository.claim_upload(**kwargs)
+    assert created
+    assert second.job_id != first.job_id
+    assert repository.get_job(first.job_id).status == JobStatus.FAILED
+
+
 def _claim_with_owner(tmp_path, owner):
     import sqlite3
 
