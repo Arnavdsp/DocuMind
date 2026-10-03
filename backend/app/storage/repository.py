@@ -294,6 +294,14 @@ class Repository:
                 ),
             )
 
+    def latest_job_id(self, document_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT job_id FROM jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1",
+                (document_id,),
+            ).fetchone()
+        return row["job_id"] if row else None
+
     def owns_document(self, job_id: str, document_id: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(f"SELECT {_OWNS_DOCUMENT}", (job_id, *_ACTIVE, document_id)).fetchone()

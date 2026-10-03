@@ -30,10 +30,6 @@ def _word_count(pages) -> int:
     return sum(len(p.text.split()) for p in pages)
 
 
-def _superseded(document_id: str, job_id: str) -> None:
-    log_event(logger, "ingestion_superseded", document_id=document_id, job_id=job_id)
-
-
 def run_ingestion(
     *,
     document_id: str,
@@ -46,6 +42,19 @@ def run_ingestion(
     model_service: ModelService,
     settings: Settings,
 ) -> None:
+    def stop_superseded() -> None:
+        # The document was deleted, or a newer upload took it over. Pages and
+        # vectors are keyed by content hash, so a newer job writes the same files
+        # and they are left to it. If the document is gone and nothing newer has
+        # started, remove anything this job wrote after the delete.
+        if repository.get_document(document_id) is None and repository.latest_job_id(document_id) == job_id:
+            blob_store.delete(document_id)
+            vector_store.delete(document_id)
+        log_event(logger, "ingestion_superseded", document_id=document_id, job_id=job_id)
+
+    if not repository.owns_document(job_id, document_id):
+        # deleted before the worker started; skip extraction (OCR can be slow)
+        return stop_superseded()
     try:
         repository.update_job(
             job_id, status=JobStatus.RUNNING, stage=ProcessingStage.EXTRACTING, progress=0.1, if_active=True
@@ -70,8 +79,11 @@ def run_ingestion(
             return
 
         if not repository.owns_document(job_id, document_id):
-            return _superseded(document_id, job_id)
+            return stop_superseded()
         blob_store.save_pages(document_id, result.pages)
+        # checked again after the write: a delete can land between the check and it
+        if not repository.owns_document(job_id, document_id):
+            return stop_superseded()
         repository.update_job(job_id, stage=ProcessingStage.CHUNKING, progress=0.4, if_active=True)
 
         chunks = chunk_document(
@@ -86,8 +98,10 @@ def run_ingestion(
             embeddings = model_service.embed([c.text for c in chunks])
             repository.update_job(job_id, stage=ProcessingStage.INDEXING, progress=0.85, if_active=True)
             if not repository.owns_document(job_id, document_id):
-                return _superseded(document_id, job_id)
+                return stop_superseded()
             vector_store.add(chunks, embeddings)
+            if not repository.owns_document(job_id, document_id):
+                return stop_superseded()
 
         page_infos = [
             PageInfo(
@@ -117,12 +131,7 @@ def run_ingestion(
             job_id=job_id,
         )
         if not finished:
-            # Deleted or replaced while we were indexing. If the document is gone,
-            # remove what we just wrote; a replacement writes its own copy.
-            if repository.get_document(document_id) is None:
-                blob_store.delete(document_id)
-                vector_store.delete(document_id)
-            return _superseded(document_id, job_id)
+            return stop_superseded()
         repository.update_job(
             job_id, status=JobStatus.SUCCEEDED, stage=ProcessingStage.READY, progress=1.0, if_active=True
         )
@@ -136,6 +145,8 @@ def run_ingestion(
 
     except AppError as exc:
         log_event(logger, "ingestion_failed", level=40, document_id=document_id, error=str(exc))
+        if not repository.owns_document(job_id, document_id):
+            return stop_superseded()
         repository.update_document_status(
             document_id, status=ProcessingStage.FAILED, error_message=exc.user_message, job_id=job_id
         )
@@ -150,6 +161,8 @@ def run_ingestion(
     except Exception as exc:  # never let an unexpected error strand a job as "running" forever
         log_event(logger, "ingestion_unexpected_error", level=50, document_id=document_id, error=str(exc))
         message = "The document could not be processed. Try a smaller file or retry."
+        if not repository.owns_document(job_id, document_id):
+            return stop_superseded()
         repository.update_document_status(
             document_id, status=ProcessingStage.FAILED, error_message=message, job_id=job_id
         )

@@ -242,6 +242,42 @@ def test_ingestion_for_a_deleted_document_writes_nothing(temp_data_dir):
     assert repository.get_job(job.job_id).status == JobStatus.FAILED
 
 
+def test_ingestion_deleted_mid_write_removes_what_it_wrote(temp_data_dir, monkeypatch):
+    from app.dependencies import get_blob_store, get_repository, get_vector_store
+    from app.services.ingestion_pipeline import run_ingestion
+    from app.services.model_service import get_model_service
+
+    repository, blob_store, vector_store = get_repository(), get_blob_store(), get_vector_store()
+    raw = read_fixture("sample.txt")
+    document_id = "a1" * 16
+    job, _ = repository.claim_upload(
+        document_id=document_id, filename="s.txt", content_type="text/plain", size_bytes=len(raw)
+    )
+
+    # the delete lands right after the ownership check, while pages are written
+    save_pages = blob_store.save_pages
+
+    def save_then_delete(doc_id, pages):
+        save_pages(doc_id, pages)
+        repository.delete_document(doc_id)
+
+    monkeypatch.setattr(blob_store, "save_pages", save_then_delete)
+    run_ingestion(
+        document_id=document_id,
+        job_id=job.job_id,
+        extension="txt",
+        raw_bytes=raw,
+        repository=repository,
+        blob_store=blob_store,
+        vector_store=vector_store,
+        model_service=get_model_service(),
+        settings=get_settings(),
+    )
+
+    assert blob_store.load_pages(document_id) == []
+    assert not vector_store.exists(document_id)
+
+
 def test_oversized_upload_is_rejected(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "max_upload_bytes", 10)
