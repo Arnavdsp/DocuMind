@@ -101,6 +101,53 @@ def test_failed_document_is_claimed_again(tmp_path):
     assert second.job_id != first.job_id
 
 
+def _claim_with_owner(tmp_path, owner):
+    import sqlite3
+
+    from app.storage.repository import Repository
+
+    repository = Repository(tmp_path / "meta.db")
+    kwargs = dict(document_id="c" * 32, filename="c.txt", content_type="text/plain", size_bytes=1)
+    first, _ = repository.claim_upload(**kwargs)
+    repository.update_document_status(kwargs["document_id"], status=ProcessingStage.EMBEDDING)
+    with sqlite3.connect(tmp_path / "meta.db") as conn:
+        conn.execute("UPDATE jobs SET status = 'running', owner = ? WHERE job_id = ?", (owner, first.job_id))
+    second, created = repository.claim_upload(**kwargs)
+    return repository, first, second, created
+
+
+def test_job_of_an_exited_worker_is_not_reused(tmp_path):
+    import socket
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()  # its pid now belongs to no running process
+    repository, first, second, created = _claim_with_owner(
+        tmp_path, f"{socket.gethostname()}:{proc.pid}:deadbeef"
+    )
+    assert created
+    assert second.job_id != first.job_id
+    assert repository.get_job(first.job_id).status == JobStatus.FAILED
+
+
+def test_job_of_a_restarted_process_with_the_same_pid_is_not_reused(tmp_path):
+    import os
+    import socket
+
+    _, first, second, created = _claim_with_owner(
+        tmp_path, f"{socket.gethostname()}:{os.getpid()}:previous-run"
+    )
+    assert created
+    assert second.job_id != first.job_id
+
+
+def test_job_owned_by_another_host_is_reused(tmp_path):
+    _, first, second, created = _claim_with_owner(tmp_path, "some-other-host:1:abc")
+    assert not created
+    assert second.job_id == first.job_id
+
+
 def test_oversized_upload_is_rejected(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "max_upload_bytes", 10)

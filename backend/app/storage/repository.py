@@ -12,6 +12,8 @@ three concerns apart is what makes independent scaling/migration possible.
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sqlite3
 import threading
 import uuid
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress REAL NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    error_message TEXT
+    error_message TEXT,
+    owner TEXT
 );
 
 CREATE TABLE IF NOT EXISTS summaries (
@@ -58,6 +61,39 @@ CREATE TABLE IF NOT EXISTS summaries (
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# Ingestion runs as a background task inside the process that accepted the upload,
+# so a job dies with that process. Each job records which process owns it.
+_PROCESS_TOKEN = uuid.uuid4().hex
+
+
+def _process_owner() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}:{_PROCESS_TOKEN}"
+
+
+def _owner_is_gone(owner: str | None) -> bool:
+    """True only when the process that owns a job has definitely exited.
+
+    Anything we can't check (no owner recorded, or another host) counts as alive,
+    so a job that is still running somewhere is never taken over.
+    """
+    if not owner:
+        return False
+    host, pid, token = owner.rsplit(":", 2)
+    if host != socket.gethostname():
+        return False
+    if int(pid) == os.getpid():
+        # Same pid but a different token: this process was restarted and reused
+        # the pid, which is the usual case in a container where the server is pid 1.
+        return token != _PROCESS_TOKEN
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
 
 
 class Repository:
@@ -81,6 +117,9 @@ class Repository:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
         if "chunk_count" not in existing:
             conn.execute("ALTER TABLE documents ADD COLUMN chunk_count INTEGER")
+        job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "owner" not in job_columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
 
     @contextmanager
     def _connect(self):
@@ -220,7 +259,8 @@ class Repository:
         Returns (job, created). Only the caller that gets created=True should save
         the blob and schedule ingestion. A concurrent upload of the same bytes gets
         the in-flight job back, and a READY document gets a job that is already
-        finished. A FAILED document is ingested again.
+        finished. A FAILED document is ingested again, and so is one whose job was
+        orphaned because the process running it exited (a restart mid-ingestion).
         """
         now = _now()
         job_id = str(uuid.uuid4())
@@ -234,13 +274,25 @@ class Repository:
             ).fetchone()
             status = ProcessingStage(row["status"]) if row else None
             latest = conn.execute(
-                "SELECT job_id FROM jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT job_id, status, owner FROM jobs WHERE document_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
                 (document_id,),
             ).fetchone()
+            in_flight = (
+                status not in (None, ProcessingStage.READY, ProcessingStage.FAILED)
+                and latest is not None
+                and JobStatus(latest["status"]) in (JobStatus.PENDING, JobStatus.RUNNING)
+            )
+            if in_flight and _owner_is_gone(latest["owner"]):
+                conn.execute(
+                    "UPDATE jobs SET status = ?, error_message = ?, updated_at = ? WHERE job_id = ?",
+                    (JobStatus.FAILED.value, "Ingestion stopped: its worker exited.", now, latest["job_id"]),
+                )
+                in_flight = False
 
             if status == ProcessingStage.READY:
                 job_values = (JobStatus.SUCCEEDED, ProcessingStage.READY, 1.0)
-            elif status not in (None, ProcessingStage.FAILED) and latest is not None:
+            elif in_flight:
                 job_id = latest["job_id"]
                 job_values = None
             else:
@@ -256,9 +308,10 @@ class Repository:
             if job_values is not None:
                 job_status, stage, progress = job_values
                 conn.execute(
-                    "INSERT INTO jobs (job_id, document_id, status, stage, progress, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (job_id, document_id, job_status.value, stage.value, progress, now, now),
+                    "INSERT INTO jobs "
+                    "(job_id, document_id, status, stage, progress, created_at, updated_at, owner) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, document_id, job_status.value, stage.value, progress, now, now, _process_owner()),
                 )
         return self.get_job(job_id), created  # type: ignore[return-value]
 
