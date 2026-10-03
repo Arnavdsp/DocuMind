@@ -227,7 +227,7 @@ def test_ingestion_for_a_deleted_document_writes_nothing(temp_data_dir):
     run_ingestion(
         document_id=document_id,
         job_id=job.job_id,
-        extension="txt",
+        extension=".txt",
         raw_bytes=raw,
         repository=repository,
         blob_store=blob_store,
@@ -242,7 +242,11 @@ def test_ingestion_for_a_deleted_document_writes_nothing(temp_data_dir):
     assert repository.get_job(job.job_id).status == JobStatus.FAILED
 
 
-def test_ingestion_deleted_mid_write_removes_what_it_wrote(temp_data_dir, monkeypatch):
+def test_delete_waits_for_an_in_progress_write_and_nothing_is_left(temp_data_dir, monkeypatch):
+    import threading
+    import time
+
+    from app.api.routes.documents import remove_document
     from app.dependencies import get_blob_store, get_repository, get_vector_store
     from app.services.ingestion_pipeline import run_ingestion
     from app.services.model_service import get_model_service
@@ -254,18 +258,23 @@ def test_ingestion_deleted_mid_write_removes_what_it_wrote(temp_data_dir, monkey
         document_id=document_id, filename="s.txt", content_type="text/plain", size_bytes=len(raw)
     )
 
-    # the delete lands right after the ownership check, while pages are written
+    # a delete arrives while the worker is writing pages
     save_pages = blob_store.save_pages
+    deleter = threading.Thread(target=remove_document, args=(document_id, repository, blob_store, vector_store))
 
-    def save_then_delete(doc_id, pages):
+    present_during_write = []
+
+    def slow_save(doc_id, pages):
+        deleter.start()
+        time.sleep(0.2)  # the delete is now waiting on the document lock
+        present_during_write.append(repository.get_document(doc_id) is not None)
         save_pages(doc_id, pages)
-        repository.delete_document(doc_id)
 
-    monkeypatch.setattr(blob_store, "save_pages", save_then_delete)
+    monkeypatch.setattr(blob_store, "save_pages", slow_save)
     run_ingestion(
         document_id=document_id,
         job_id=job.job_id,
-        extension="txt",
+        extension=".txt",
         raw_bytes=raw,
         repository=repository,
         blob_store=blob_store,
@@ -273,9 +282,13 @@ def test_ingestion_deleted_mid_write_removes_what_it_wrote(temp_data_dir, monkey
         model_service=get_model_service(),
         settings=get_settings(),
     )
+    deleter.join(timeout=5)
 
+    assert present_during_write == [True]  # the delete waited for the write
+    assert repository.get_document(document_id) is None
     assert blob_store.load_pages(document_id) == []
     assert not vector_store.exists(document_id)
+    assert repository.get_job(job.job_id).status == JobStatus.FAILED
 
 
 def test_oversized_upload_is_rejected(client, monkeypatch):

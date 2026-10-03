@@ -63,7 +63,11 @@ async def upload_document(
         return DocumentUploadResponse(document=document, job_id=job.job_id)
 
     try:
-        blob_store.save_raw(document_id, validated.extension, raw_bytes)
+        with blob_store.lock(document_id):
+            # deleted between the claim and here: don't write into a removed document
+            if not repository.owns_document(job.job_id, document_id):
+                return DocumentUploadResponse(document=document, job_id=job.job_id)
+            blob_store.save_raw(document_id, validated.extension, raw_bytes)
     except Exception:
         # Without this the claimed job would stay pending and every re-upload
         # would be handed back a job that never runs.
@@ -100,19 +104,29 @@ async def get_document(document_id: str, repository: Repository = Depends(get_re
     return document
 
 
+def remove_document(
+    document_id: str, repository: Repository, blob_store: DocumentBlobStore, vector_store: VectorStore
+) -> None:
+    # Under the document lock, so an ingestion that is mid-write finishes that
+    # write first, and then sees its job failed and writes nothing more.
+    with blob_store.lock(document_id):
+        repository.delete_document(document_id)
+        blob_store.delete(document_id)
+        vector_store.delete(document_id)
+
+
 @router.delete("/{document_id}", status_code=204)
-async def delete_document(
+def delete_document(
     document_id: str,
     repository: Repository = Depends(get_repository),
     blob_store: DocumentBlobStore = Depends(get_blob_store),
     vector_store: VectorStore = Depends(get_vector_store),
 ) -> None:
+    # plain def: waiting on the document lock must not block the event loop
     document = repository.get_document(document_id)
     if not document:
         raise DocumentNotFound()
-    repository.delete_document(document_id)
-    blob_store.delete(document_id)
-    vector_store.delete(document_id)
+    remove_document(document_id, repository, blob_store, vector_store)
 
 
 @router.get("/{document_id}/pages")
