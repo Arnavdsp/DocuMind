@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile
 from fastapi import File as FastAPIFile
 
@@ -51,31 +49,27 @@ async def upload_document(
 
     document_id = compute_document_id(raw_bytes)
 
-    # Content-addressed cache hit: identical bytes were already uploaded.
-    existing = repository.get_document(document_id)
-    if existing and existing.status == ProcessingStage.READY:
-        # Nothing to ingest, so the job is finished as soon as it exists; a pending
-        # job here would leave the client polling forever.
-        job = repository.create_job(job_id=str(uuid.uuid4()), document_id=document_id)
-        repository.update_job(
-            job.job_id, status=JobStatus.SUCCEEDED, stage=ProcessingStage.READY, progress=1.0
-        )
-        return DocumentUploadResponse(document=existing, job_id=job.job_id)
-    if existing and existing.status != ProcessingStage.FAILED:
-        # Still ingesting: hand back the in-flight job instead of starting a second
-        # ingestion that would reset the document and race on its blob and index.
-        in_flight = repository.get_latest_job_for_document(document_id)
-        if in_flight is not None:
-            return DocumentUploadResponse(document=existing, job_id=in_flight.job_id)
-
-    blob_store.save_raw(document_id, validated.extension, raw_bytes)
-    document = repository.create_document(
+    # Content-addressed: identical bytes map to the same document. The claim is
+    # atomic, so a re-upload (even a concurrent one) gets the existing job back
+    # instead of starting a second ingestion that would race on the blob and index.
+    job, created = repository.claim_upload(
         document_id=document_id,
         filename=validated.safe_filename,
         content_type=validated.content_type,
         size_bytes=validated.size_bytes,
     )
-    job = repository.create_job(job_id=str(uuid.uuid4()), document_id=document_id)
+    document = repository.get_document(document_id)
+    if not created:
+        return DocumentUploadResponse(document=document, job_id=job.job_id)
+
+    try:
+        blob_store.save_raw(document_id, validated.extension, raw_bytes)
+    except Exception:
+        # Without this the claimed job would stay pending and every re-upload
+        # would be handed back a job that never runs.
+        repository.update_document_status(document_id, status=ProcessingStage.FAILED)
+        repository.update_job(job.job_id, status=JobStatus.FAILED, stage=ProcessingStage.FAILED)
+        raise
 
     background_tasks.add_task(
         run_ingestion,

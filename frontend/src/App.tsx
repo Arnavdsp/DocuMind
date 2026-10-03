@@ -207,14 +207,18 @@ export default function App() {
     setUploading(true);
     setUploadError(null);
     clearDocumentState();
+    const gen = docGeneration.current;
     setUploadName(file.name);
     setUploadSize(file.size);
     try {
       const res = await api.uploadDocument(file);
+      // reset while the upload was in flight: don't bring the document back
+      if (gen !== docGeneration.current) return;
       setDoc(res.document);
       setJobId(res.job_id);
       setActivePanel("collapse");
     } catch (err) {
+      if (gen !== docGeneration.current) return;
       setUploadError(messageOf(err));
       setUploadName(null);
     } finally {

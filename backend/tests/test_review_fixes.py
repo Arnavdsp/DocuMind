@@ -61,6 +61,46 @@ def test_reupload_during_ingestion_reuses_the_in_flight_job(client):
     assert job["status"] == "running"
 
 
+def test_concurrent_claims_schedule_one_ingestion(tmp_path):
+    import threading
+
+    from app.storage.repository import Repository
+
+    repository = Repository(tmp_path / "meta.db")
+    barrier = threading.Barrier(8)
+    results = []
+
+    def claim():
+        barrier.wait()
+        results.append(
+            repository.claim_upload(
+                document_id="a" * 32, filename="a.txt", content_type="text/plain", size_bytes=1
+            )
+        )
+
+    threads = [threading.Thread(target=claim) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(created for _, created in results) == 1
+    assert len({job.job_id for job, _ in results}) == 1
+
+
+def test_failed_document_is_claimed_again(tmp_path):
+    from app.storage.repository import Repository
+
+    repository = Repository(tmp_path / "meta.db")
+    kwargs = dict(document_id="b" * 32, filename="b.txt", content_type="text/plain", size_bytes=1)
+    first, _ = repository.claim_upload(**kwargs)
+    repository.update_document_status(kwargs["document_id"], status=ProcessingStage.FAILED)
+
+    second, created = repository.claim_upload(**kwargs)
+    assert created
+    assert second.job_id != first.job_id
+
+
 def test_oversized_upload_is_rejected(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "max_upload_bytes", 10)

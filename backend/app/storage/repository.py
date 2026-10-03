@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -211,13 +212,55 @@ class Repository:
                 ),
             )
 
-    def get_latest_job_for_document(self, document_id: str) -> JobRecord | None:
-        with self._connect() as conn:
+    def claim_upload(
+        self, *, document_id: str, filename: str, content_type: str, size_bytes: int
+    ) -> tuple[JobRecord, bool]:
+        """Find or create the job for an upload, in one write transaction.
+
+        Returns (job, created). Only the caller that gets created=True should save
+        the blob and schedule ingestion. A concurrent upload of the same bytes gets
+        the in-flight job back, and a READY document gets a job that is already
+        finished. A FAILED document is ingested again.
+        """
+        now = _now()
+        job_id = str(uuid.uuid4())
+        created = False
+        with self._lock, self._connect() as conn:
+            # IMMEDIATE takes SQLite's write lock up front, so two workers sharing
+            # the file can't both see "no document" and both insert one.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
+                "SELECT status FROM documents WHERE document_id = ?", (document_id,)
+            ).fetchone()
+            status = ProcessingStage(row["status"]) if row else None
+            latest = conn.execute(
                 "SELECT job_id FROM jobs WHERE document_id = ? ORDER BY created_at DESC LIMIT 1",
                 (document_id,),
             ).fetchone()
-        return self.get_job(row["job_id"]) if row else None
+
+            if status == ProcessingStage.READY:
+                job_values = (JobStatus.SUCCEEDED, ProcessingStage.READY, 1.0)
+            elif status not in (None, ProcessingStage.FAILED) and latest is not None:
+                job_id = latest["job_id"]
+                job_values = None
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO documents "
+                    "(document_id, filename, content_type, size_bytes, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (document_id, filename, content_type, size_bytes, ProcessingStage.UPLOADING.value, now, now),
+                )
+                job_values = (JobStatus.PENDING, ProcessingStage.UPLOADING, 0.0)
+                created = True
+
+            if job_values is not None:
+                job_status, stage, progress = job_values
+                conn.execute(
+                    "INSERT INTO jobs (job_id, document_id, status, stage, progress, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (job_id, document_id, job_status.value, stage.value, progress, now, now),
+                )
+        return self.get_job(job_id), created  # type: ignore[return-value]
 
     def get_job(self, job_id: str) -> JobRecord | None:
         with self._connect() as conn:
