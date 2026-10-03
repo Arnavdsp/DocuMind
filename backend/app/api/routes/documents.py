@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile
 from fastapi import File as FastAPIFile
 
@@ -18,7 +20,7 @@ from app.services.ingestion_pipeline import run_ingestion
 from app.services.model_service import ModelService, get_model_service
 from app.storage.blob_store import DocumentBlobStore, compute_document_id
 from app.storage.repository import Repository
-from app.utils.errors import DocumentNotFound, FileTooLarge
+from app.utils.errors import DocumentNotFound, FileTooLarge, UploadConflict
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -63,17 +65,19 @@ async def upload_document(
         return DocumentUploadResponse(document=document, job_id=job.job_id)
 
     try:
-        with blob_store.lock(document_id):
-            # deleted between the claim and here: don't write into a removed document
-            if not repository.owns_document(job.job_id, document_id):
-                return DocumentUploadResponse(document=document, job_id=job.job_id)
-            blob_store.save_raw(document_id, validated.extension, raw_bytes)
+        # in a thread: waiting on the document lock must not block the event loop
+        saved = await asyncio.to_thread(
+            _save_raw_if_owned, blob_store, repository, job.job_id, document_id, validated.extension, raw_bytes
+        )
     except Exception:
         # Without this the claimed job would stay pending and every re-upload
         # would be handed back a job that never runs.
         repository.update_document_status(document_id, status=ProcessingStage.FAILED)
         repository.update_job(job.job_id, status=JobStatus.FAILED, stage=ProcessingStage.FAILED)
         raise
+    if not saved:
+        # deleted between the claim and the write; nothing was stored or scheduled
+        raise UploadConflict()
 
     background_tasks.add_task(
         run_ingestion,
@@ -102,6 +106,21 @@ async def get_document(document_id: str, repository: Repository = Depends(get_re
     if not document:
         raise DocumentNotFound()
     return document
+
+
+def _save_raw_if_owned(
+    blob_store: DocumentBlobStore,
+    repository: Repository,
+    job_id: str,
+    document_id: str,
+    extension: str,
+    raw_bytes: bytes,
+) -> bool:
+    with blob_store.lock(document_id):
+        if not repository.owns_document(job_id, document_id):
+            return False
+        blob_store.save_raw(document_id, extension, raw_bytes)
+        return True
 
 
 def remove_document(

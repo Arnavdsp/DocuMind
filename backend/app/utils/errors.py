@@ -49,6 +49,12 @@ class DocumentNotFound(AppError):
     user_message = "We couldn't find that document."
 
 
+class UploadConflict(AppError):
+    error_code = "upload_conflict"
+    http_status = 409
+    user_message = "This document was deleted while it was uploading. Please upload it again."
+
+
 class DocumentNotReady(AppError):
     error_code = "document_not_ready"
     http_status = 409

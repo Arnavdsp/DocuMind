@@ -291,6 +291,33 @@ def test_delete_waits_for_an_in_progress_write_and_nothing_is_left(temp_data_dir
     assert repository.get_job(job.job_id).status == JobStatus.FAILED
 
 
+def test_lock_files_are_bounded(tmp_path):
+    from app.storage.blob_store import DocumentBlobStore
+
+    store = DocumentBlobStore(tmp_path)
+    for i in range(600):
+        with store.lock(f"{i:032x}"):
+            pass
+    assert len(list((tmp_path / ".locks").iterdir())) <= 256
+
+
+def test_upload_deleted_before_its_write_is_a_conflict(client, monkeypatch):
+    from app.dependencies import get_repository
+
+    repository = get_repository()
+    claim = repository.claim_upload
+
+    def claim_then_delete(**kwargs):
+        result = claim(**kwargs)
+        repository.delete_document(kwargs["document_id"])
+        return result
+
+    monkeypatch.setattr(repository, "claim_upload", claim_then_delete)
+    resp = _upload(client, "sample.txt", read_fixture("sample.txt"), "text/plain")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "upload_conflict"
+
+
 def test_oversized_upload_is_rejected(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "max_upload_bytes", 10)
