@@ -1,8 +1,8 @@
 # DocuMind
 
-### Document Intelligence & Grounded RAG System
+Document question answering with retrieval, citations and abstention.
 
-**Upload a document. Ask a question. Get an answer grounded in the document — with source citations and an explicit abstention path when the evidence is insufficient.**
+Upload a PDF, image or text file and ask questions about it. Answers cite the pages they came from, and when the retrieved passages don't support an answer, it says so instead of guessing.
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Hugging%20Face-yellow?logo=huggingface)](https://huggingface.co/spaces/ADP123456/DocuMind)
 [![Backend](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -11,38 +11,35 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> **DocuMind is not just a document chatbot.**
->
-> It is an end-to-end document intelligence system designed around **reliable ingestion, persistent retrieval, reranking, grounded generation, source attribution, and measurable inference stages.**
+The chat box is the small part. Most of the work is in ingestion, persistent retrieval, reranking, grounded generation, source attribution and timing each stage.
 
 ---
 
-## Live Demo
+## Live demo
 
-**Try DocuMind:**  
 https://huggingface.co/spaces/ADP123456/DocuMind
 
-The project is also structured as a deployable application rather than only a notebook/demo: the repository contains a dedicated backend, frontend, Docker deployment configuration, tests, tooling, and a persistent data layer. 
+The repo is a full application: backend, frontend, Docker deployment, tests, tooling and a persistent data layer.
 
 ---
 
-# What Problem Does DocuMind Solve?
+## The problem
 
-Traditional document QA systems often hide several engineering problems behind a simple chat interface:
+A chat box over a document hides several problems:
 
 - PDFs may contain both native text and scanned pages.
 - OCR can be expensive and unnecessary when a usable text layer already exists.
 - Re-embedding an entire document for every question wastes computation.
 - Pure vector similarity can retrieve semantically related but imprecise passages.
 - LLMs can generate plausible answers that are not actually supported by the document.
-- Users need to know **where an answer came from**.
+- Users need to know where an answer came from.
 - A system should know when the retrieved evidence is insufficient instead of confidently guessing.
 
-DocuMind addresses these problems as an integrated pipeline.
+The pipeline below handles each of these.
 
 ---
 
-# System Architecture
+## Architecture
 
 ```text
                          ┌──────────────────────┐
@@ -84,9 +81,9 @@ DocuMind addresses these problems as an integrated pipeline.
 
 ---
 
-# Core Engineering Pipeline
+## Pipeline
 
-## 1. Document Ingestion
+### 1. Ingestion
 
 DocuMind supports multiple document inputs:
 
@@ -95,7 +92,7 @@ DocuMind supports multiple document inputs:
 - PNG
 - TXT
 
-PDF processing is **page-aware** rather than treating the entire document as either text or OCR.
+PDFs are handled page by page, so one document can mix native text and OCR.
 
 For each PDF page:
 
@@ -133,9 +130,9 @@ That metadata later becomes useful for source inspection and debugging.
 
 ---
 
-# 2. Content-Addressed Document Handling
+### 2. Content-addressed documents
 
-Documents are identified from their content rather than relying only on filenames.
+A document's ID is a hash of its content, not its filename.
 
 This enables a useful optimization:
 
@@ -161,11 +158,11 @@ The API therefore avoids unnecessarily repeating ingestion for an identical docu
 
 ---
 
-# 3. Persistent Vector Retrieval
+### 3. Persistent vector retrieval
 
-A major design decision in DocuMind is that document chunks are **embedded once during ingestion**.
+Chunks are embedded once, at ingestion.
 
-The query path does **not** re-embed every document chunk.
+A question only embeds the query, never the document chunks again.
 
 Instead:
 
@@ -197,9 +194,9 @@ The current implementation provides a `VectorStore` abstraction with a `NumpyVec
 
 Embeddings are normalized and searched using cosine similarity. Per-document embeddings and chunk metadata are persisted as compressed `.npz` files. 
 
-### Why this matters
+#### Why the interface is separate
 
-The architecture deliberately separates the vector-store interface from its implementation.
+The vector-store interface is separate from its implementation.
 
 The same interface can support a future migration to:
 
@@ -212,7 +209,7 @@ without forcing changes throughout the retrieval or API layers.
 
 ---
 
-# 4. Retrieval + Reranking
+### 4. Retrieval and reranking
 
 Vector retrieval provides the initial candidate set.
 
@@ -239,7 +236,7 @@ Best Evidence
 
 Two reranking strategies are supported behind the same interface:
 
-### Lexical overlap reranking
+#### Lexical overlap reranking
 
 The default lightweight implementation combines:
 
@@ -248,7 +245,7 @@ The default lightweight implementation combines:
 
 with semantic similarity receiving the larger weight.
 
-### Cross-encoder reranking
+#### Cross-encoder reranking
 
 A configurable `CrossEncoderReranker` can use a Sentence Transformers cross-encoder when a reranker model is configured.
 
@@ -256,11 +253,11 @@ This gives the system a path from a lightweight demo configuration toward a stro
 
 ---
 
-# 5. Grounding-Aware Generation
+### 5. Grounded generation
 
 DocuMind does not simply retrieve text and send the entire document to an LLM.
 
-The generator receives **only the retrieved evidence passages**.
+The generator only sees the retrieved passages.
 
 The generation prompt explicitly instructs the model to:
 
@@ -274,11 +271,11 @@ If retrieval does not provide sufficient evidence, the system can return:
 
 > "I don't have enough information in this document to answer that."
 
-This is an explicit **abstention path**, rather than relying on the model to decide on its own whether it knows the answer. 
+So abstaining is a code path, not something left to the model.
 
 ---
 
-# 6. Grounding Levels
+### 6. Grounding levels
 
 Retrieval is converted into a grounding classification:
 
@@ -298,11 +295,11 @@ Retrieval is converted into a grounding classification:
 
 The API exposes the resulting grounding level and relevance score alongside the generated answer. 
 
-This makes retrieval quality part of the application state rather than an invisible internal operation.
+So retrieval quality is visible in the API response and the UI.
 
 ---
 
-# 7. Source Citations
+### 7. Source citations
 
 Every retrieved chunk retains document provenance such as:
 
@@ -324,11 +321,11 @@ Answer
   └── Source → Page 8
 ```
 
-This allows the frontend to present document-grounded evidence rather than an unsupported text response. 
+The frontend shows these next to the answer.
 
 ---
 
-# 8. Measurable Retrieval Pipeline
+### 8. Stage timings
 
 DocuMind also instruments individual retrieval stages.
 
@@ -340,13 +337,13 @@ The retrieval pipeline tracks:
 - generation latency
 - total request latency
 
-The implementation intentionally distinguishes between a stage that **did not execute** and a stage that executed in approximately zero milliseconds, returning `None` where appropriate rather than misleading `0 ms` measurements. 
+A stage that didn't run reports `null` in the API response, not `0 ms`, so a skipped stage can't be mistaken for a fast one.
 
 This makes the application easier to profile and optimize.
 
 ---
 
-# Supported Capabilities
+## What it supports
 
 | Capability | Implementation |
 |---|---|
@@ -374,9 +371,9 @@ This makes the application easier to profile and optimize.
 
 ---
 
-# Technology Stack
+## Stack
 
-## Backend
+### Backend
 
 - Python 3.11+
 - FastAPI
@@ -391,7 +388,7 @@ This makes the application easier to profile and optimize.
 
 The backend pins its core dependencies and separately defines its ML/RAG dependencies. 
 
-## ML / RAG
+### ML / RAG
 
 - Hugging Face Transformers
 - Sentence Transformers
@@ -403,7 +400,7 @@ The backend pins its core dependencies and separately defines its ML/RAG depende
 
 The repository intentionally avoids pinning PyTorch in the ML requirements because the Colab deployment can provide a CUDA-compatible build. 
 
-## Frontend
+### Frontend
 
 - React 19
 - TypeScript
@@ -415,7 +412,7 @@ The repository intentionally avoids pinning PyTorch in the ML requirements becau
 
 The frontend is configured as a modern Vite/React application with dedicated build, lint, preview, and API-test scripts. 
 
-## Deployment
+### Deployment
 
 - Docker
 - Docker Compose
@@ -427,7 +424,7 @@ The Docker deployment uses a persistent volume for documents, SQLite metadata, a
 
 ---
 
-# Repository Structure
+## Repository layout
 
 ```text
 DocuMind/
@@ -484,11 +481,11 @@ DocuMind/
 └── LICENSE
 ```
 
-The repository is organized as a full application rather than a single notebook, with separate backend, frontend, Space, documentation, tooling, deployment, and migration components. 
+Backend, frontend, the Space, docs, tooling, deployment and migrations each have their own folder. 
 
 ---
 
-# API Surface
+## API
 
 The backend exposes dedicated API routes for the major document workflows.
 
@@ -512,16 +509,16 @@ The document endpoint also creates background ingestion jobs, while the QA endpo
 
 ---
 
-# Running Locally
+## Running locally
 
-## 1. Clone
+### 1. Clone
 
 ```bash
 git clone https://github.com/Arnavdsp/DocuMind.git
 cd DocuMind
 ```
 
-## 2. Configure environment
+### 2. Configure the environment
 
 ```bash
 cp .env.example .env
@@ -531,7 +528,7 @@ Configure the model/provider settings required by your deployment.
 
 ---
 
-## 3. Backend
+### 3. Backend
 
 ```bash
 cd backend
@@ -551,7 +548,7 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 4. Frontend
+### 4. Frontend
 
 ```bash
 cd frontend
@@ -568,7 +565,7 @@ npm run build
 
 ---
 
-# Docker Deployment
+## Docker
 
 DocuMind includes a Docker Compose deployment path:
 
@@ -592,9 +589,9 @@ and includes an application health check.
 
 ---
 
-# Design Decisions
+## Design decisions
 
-## Why page-level OCR?
+### Why page-level OCR?
 
 A document does not necessarily have one extraction mode.
 
@@ -615,7 +612,7 @@ DocuMind evaluates pages independently and selectively falls back to OCR.
 
 ---
 
-## Why persistent embeddings?
+### Why persistent embeddings?
 
 Re-embedding every document chunk for every user question creates unnecessary computation.
 
@@ -632,11 +629,11 @@ QUERY
 question → ONE embedding → search → rerank
 ```
 
-This turns document embeddings into reusable state rather than recomputing them for every request. 
+Embeddings are stored once and reused by every question.
 
 ---
 
-## Why reranking?
+### Why reranking?
 
 Vector retrieval is useful for finding semantically related material, but the top semantic results are not necessarily the most precise evidence for a particular question.
 
@@ -646,7 +643,7 @@ The architecture also keeps reranking behind an interface, allowing lightweight 
 
 ---
 
-## Why abstention?
+### Why abstention?
 
 A document QA system should not treat "generate something plausible" as success.
 
@@ -668,7 +665,7 @@ The generator is additionally instructed to answer only from the supplied eviden
 
 ---
 
-# Engineering Focus
+## Principles
 
 DocuMind was designed around a few principles:
 
@@ -686,7 +683,7 @@ Vector storage and reranking are abstracted so individual components can be repl
 
 ### 4. Observable inference
 
-Retrieval stages expose latency information rather than treating the RAG pipeline as a black box.
+Each retrieval stage reports its latency.
 
 ### 5. Graceful failure
 
@@ -701,7 +698,7 @@ The system has explicit handling for:
 
 ---
 
-# Testing & Development
+## Testing and development
 
 The backend includes a dedicated test structure and development dependencies.
 
@@ -713,23 +710,23 @@ npm run lint
 npm run test:api
 ```
 
-The project therefore separates development, ML dependencies, application dependencies, and deployment concerns rather than relying on a single monolithic environment.  
+Development, ML, application and deployment dependencies are kept in separate files.
 
 ---
 
-# Current Deployment Model
+## Deployment today
 
 DocuMind is available as a Hugging Face Space:
 
-**https://huggingface.co/spaces/ADP123456/DocuMind**
+https://huggingface.co/spaces/ADP123456/DocuMind
 
-The repository also contains a Docker-based deployment path designed around persistent application storage, providing a path beyond the ephemeral demo environment. citeturn0view1turn15file0
+The Docker setup keeps application storage on a persistent volume, for running it outside the Space, where storage is ephemeral.
 
 ---
 
-# Future Engineering Directions
+## Next
 
-The current abstractions make several extensions straightforward:
+What I'd add next:
 
 - Replace NumPy vector storage with FAISS/Qdrant/pgvector
 - Add hybrid lexical + semantic retrieval
@@ -743,37 +740,23 @@ The current abstractions make several extensions straightforward:
 - Add evaluation datasets for grounded QA
 - Optimize GPU inference and batching
 
-These are natural extensions of the existing architecture rather than changes to the project's core design.
+None of these needs a redesign; they fit behind the existing interfaces.
 
 ---
 
-# Why This Project Matters
+## Why I built it
 
-DocuMind demonstrates a broader engineering idea:
+Picking the model was the easy part. Most of the effort went into the system around it:
 
-> **Building useful AI systems is not only about choosing an LLM. It is about designing the system around the model.**
+document processing → OCR → chunking → embeddings → persistent retrieval → reranking → grounding → generation → citations → abstention → API, UI and deployment.
 
-The project combines:
-
-**Document Processing**  
-→ **OCR**  
-→ **Chunking**  
-→ **Embeddings**  
-→ **Persistent Retrieval**  
-→ **Reranking**  
-→ **Grounding**  
-→ **Generation**  
-→ **Citations**  
-→ **Abstention**  
-→ **API + UI + Deployment**
-
-That makes DocuMind an example of **end-to-end AI engineering**, rather than an isolated LLM demo.
+I wanted to build all of it end to end, not only the LLM call.
 
 ---
 
-# License
+## License
 
-This project is licensed under the **MIT License**.
+MIT.
 
 See [LICENSE](LICENSE) for details.
 
@@ -781,7 +764,7 @@ See [LICENSE](LICENSE) for details.
 
 ## Author
 
-**Arnav Deshpande**
+Arnav Deshpande
 
 B.Tech — Space Science & Engineering, IIT Indore
 
@@ -789,10 +772,10 @@ Interested in:
 
 `AI Engineering` · `Machine Learning` · `Deep Learning` · `Computer Vision` · `Generative AI` · `RAG Systems` · `Document Intelligence`
 
-GitHub: **https://github.com/Arnavdsp**
+GitHub: https://github.com/Arnavdsp
 
 ---
 
 <p align="center">
-  <strong>DocuMind — From documents to grounded intelligence.</strong>
+  DocuMind: answers from your documents, with citations.
 </p>
