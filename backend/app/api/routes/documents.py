@@ -72,8 +72,12 @@ async def upload_document(
     except Exception:
         # Without this the claimed job would stay pending and every re-upload
         # would be handed back a job that never runs.
-        repository.update_document_status(document_id, status=ProcessingStage.FAILED)
-        repository.update_job(job.job_id, status=JobStatus.FAILED, stage=ProcessingStage.FAILED)
+        # Scoped to this upload's job: if the document was deleted and uploaded
+        # again meanwhile, the new upload's row and job are left alone.
+        repository.update_document_status(document_id, status=ProcessingStage.FAILED, job_id=job.job_id)
+        repository.update_job(
+            job.job_id, status=JobStatus.FAILED, stage=ProcessingStage.FAILED, if_active=True
+        )
         raise
     if not saved:
         # deleted between the claim and the write; nothing was stored or scheduled
