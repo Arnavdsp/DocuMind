@@ -337,7 +337,7 @@ The retrieval pipeline tracks:
 - generation latency
 - total request latency
 
-A stage that didn't run reports `None`, not `0 ms`, so a skipped stage can't be mistaken for a fast one.
+A stage that didn't run reports `null` in the API response, not `0 ms`, so a skipped stage can't be mistaken for a fast one.
 
 This makes the application easier to profile and optimize.
 
